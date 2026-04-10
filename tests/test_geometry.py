@@ -247,7 +247,7 @@ def test_mercator_bounds_for_features_single_point():
 
 def test_mercator_bounds_for_features_multiple():
     pts = [
-        ensure_mercator(Point(0.0, 0.0), "EPSG:4326"),
+        ensure_mercator(Point(-10.0, -45.0), "EPSG:4326"),
         ensure_mercator(Point(10.0, 45.0), "EPSG:4326"),
     ]
     bounds = mercator_bounds_for_features(pts)
