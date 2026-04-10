@@ -1,178 +1,122 @@
-# OFM Symbolic Rendering Service
+# georender
 
-A small FastAPI renderer that applies a named ruleset to either:
+[![Build and push Docker image](https://github.com/openfantasymap/georender/actions/workflows/docker.yml/badge.svg)](https://github.com/openfantasymap/georender/actions/workflows/docker.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-- a named OFM-style map source loaded from `maps/*/timeline.json` or `maps/*.json`
-- an ad hoc GeoJSON posted directly in the request body
+A symbolic map rendering service for [Open Fantasy Maps](https://github.com/openfantasymap). It applies a named JSON ruleset to geospatial data and renders PNG images — either as slippy-map tiles, full bounding-box images, or ad hoc POSTed GeoJSON.
 
-It now supports the URL contract discussed for OFM-like timelines:
-
-- `GET /{map}/{ruleset}/{z}/{x}/{y}.png`
-- `GET /{map}/{ruleset}/tilejson.json`
-- `GET /{map}/{ruleset}/image.png?...`
-- `POST /render/{ruleset}.png`
-
-The service caches rendered PNG tiles and images on disk.
-
-## What `map` means
-
-`map` is a source descriptor, not raw data. In OFM terms this is the timeline entry.
-
-A timeline JSON can point to:
-
-- `mode: "geojson"` for local GeoJSON files
-- `mode: "postgis"` for PostGIS-backed layers
-- `mode: "mvt"` for remote MVT sources
-
-The renderer resolves the source from the timeline entry, fetches the relevant features, and then applies the selected ruleset.
-
-## Project structure
-
-```text
-georender_service/
-├── assets/
-│   └── assets.json
-├── cache/
-├── connections.example.json
-├── georender_service/
-│   ├── app.py
-│   ├── cache.py
-│   ├── engine.py
-│   ├── geometry.py
-│   ├── models.py
-│   ├── rules.py
-│   ├── sources.py
-│   └── tiles.py
-├── maps/
-│   └── demo/
-│       └── timeline.json
-├── rulesets/
-│   └── demo.json
-├── example.geojson
-└── requirements.txt
-```
-
-## Install
+## Quick start
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+docker pull ghcr.io/openfantasymap/georender:main
+docker run -p 8000:8000 ghcr.io/openfantasymap/georender:main
 ```
 
-## Run
+Then try the included demo:
 
 ```bash
-uvicorn georender_service.app:app --reload
+curl "http://localhost:8000/demo/demo/3/4/2.png" --output tile.png
+curl "http://localhost:8000/demo/demo/image.png?width=1024&height=768" --output image.png
 ```
 
-## Routes
+## API
 
-### Health and catalog
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Liveness check |
+| GET | `/rulesets` | List available rulesets |
+| GET | `/maps` | List configured map sources |
+| GET | `/maps/{map}` | Describe a map source |
+| GET | `/{map}/{ruleset}/{z}/{x}/{y}.png` | Slippy-map tile |
+| GET | `/{map}/{ruleset}/tilejson.json` | TileJSON 3.0 descriptor |
+| GET | `/{map}/{ruleset}/image.png` | Full image (bbox or center/zoom from timeline) |
+| POST | `/render/{ruleset}.png` | Render ad hoc GeoJSON body |
 
-```bash
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/rulesets
-curl http://127.0.0.1:8000/maps
-curl http://127.0.0.1:8000/maps/demo
-```
+Query params for tile/image routes: `tile_size`, `buffer_px`, `padding_px`, `width`, `height`, `bbox`, `bbox_crs`.
 
-### Named map tile
+## Map sources
 
-```bash
-curl "http://127.0.0.1:8000/demo/demo/3/4/2.png?tile_size=256&buffer_px=32" --output tile.png
-```
+Map sources are discovered from `maps/*.json` and `maps/*/timeline.json`. The `mode` field selects the data backend:
 
-### Named map TileJSON
-
-```bash
-curl http://127.0.0.1:8000/demo/demo/tilejson.json
-```
-
-### Named map image
-
-If `bbox` is omitted, the service uses `base.lng`, `base.lat`, and `base.zoom` from the map timeline when available.
-
-```bash
-curl "http://127.0.0.1:8000/demo/demo/image.png?width=1024&height=768" --output image.png
-```
-
-Explicit bbox example:
-
-```bash
-curl "http://127.0.0.1:8000/demo/demo/image.png?width=1024&height=768&bbox=10.5,44.3,11.8,45.3&bbox_crs=EPSG:4326" --output image.png
-```
-
-### Ad hoc GeoJSON render
-
-```bash
-curl -X POST "http://127.0.0.1:8000/render/demo.png?width=1024&height=768" \
-  -H "Content-Type: application/json" \
-  --data-binary @example.geojson \
-  --output out.png
-```
-
-## Timeline format
-
-A minimal geojson-backed timeline:
-
+**GeoJSON** — reads a local file:
 ```json
 {
-  "name": "Demo",
-  "url": "/demo",
-  "mode": "geojson",
-  "geojson": "../../example.geojson",
-  "base": {
-    "zoom": 3.8,
-    "lat": 45.0,
-    "lng": 11.0
-  }
+  "name": "My World", "url": "/myworld", "mode": "geojson",
+  "geojson": "../../myworld.geojson",
+  "base": { "zoom": 4, "lat": 0, "lng": 0 }
 }
 ```
 
-A PostGIS-backed timeline in OFM style:
-
+**PostGIS** — queries a PostGIS database (requires `connections.json`, see below):
 ```json
 {
-  "name": "Alien",
-  "url": "/alien",
-  "mode": "postgis",
-  "connection": {
-    "db": "alien"
-  },
+  "name": "Alien", "url": "/alien", "mode": "postgis",
+  "connection": { "db": "alien" },
   "events": "locations",
-  "relatedLayers": ["systems-circle", "systems-circle-major", "spacestation-circle"],
-  "base": {
-    "zoom": 9.85,
-    "lat": 0,
-    "lng": 0
-  }
+  "relatedLayers": ["systems-circle", "spacestation-circle"],
+  "base": { "zoom": 9.85, "lat": 0, "lng": 0 }
 }
 ```
 
-## connections.json
+**MVT** — fetches remote Mapbox Vector Tiles:
+```json
+{
+  "name": "Remote", "url": "/remote", "mode": "mvt",
+  "tile_url_template": "https://example.com/tiles/{z}/{x}/{y}.pbf",
+  "relatedLayers": ["roads", "water"]
+}
+```
 
-For PostGIS sources, create a `connections.json` file at the project root.
+### `connections.json`
 
-Example:
+Required for PostGIS sources. Copy the example and fill in your DSN:
+
+```bash
+cp connections.example.json connections.json
+```
 
 ```json
 {
-  "alien": {
-    "dsn": "postgresql://user:password@localhost:5432/alien"
-  }
+  "mydb": { "dsn": "postgresql://user:password@host:5432/mydb" }
 }
 ```
 
-The service ships with `connections.example.json` as a template.
+When running via Docker, mount it at runtime — do not bake credentials into the image:
 
+```bash
+docker run -v $(pwd)/connections.json:/app/connections.json \
+           -v $(pwd)/maps:/app/maps \
+           -p 8000:8000 \
+           ghcr.io/openfantasymap/georender:main
+```
 
-## Assets and variants
+## Rulesets
 
-Assets can now be defined externally in `assets/assets.json`, grouped into collections.
-A ruleset can then import one or more collections through `asset_collections`, either as a list or as an alias map.
+Rulesets live in `rulesets/<name>.json`. Rules are applied in ascending `z_index` order. Each rule matches features by geometry type and property filters, then renders them with a symbolizer.
 
-Example asset registry:
+```json
+{
+  "background": "#f7fbff",
+  "asset_collections": { "terrain": "terrain" },
+  "rules": [
+    {
+      "name": "water", "z_index": 1,
+      "geometry": ["Polygon", "MultiPolygon"],
+      "filter": { "kind": "water" },
+      "symbolizer": { "type": "polygon_fill", "fill": "#9fd7ffcc" },
+      "edge_fade": { "distance_px": 10 }
+    }
+  ]
+}
+```
+
+**Symbolizers**: `icon`, `polygon_fill`, `polygon_pattern`, `line_pattern`.
+
+**Filter operators**: equality, `in`, `not_in`, `exists`, `gte`, `lte`.
+
+## Assets
+
+Assets are defined in `assets/assets.json` grouped into collections. A ruleset references them via `asset_collections`. Variant selection and randomization (rotation, flip, brightness/contrast jitter) are deterministic per position, so tiles stay visually stable across requests.
 
 ```json
 {
@@ -181,76 +125,28 @@ Example asset registry:
       "stone-floor": {
         "kind": "variant_set",
         "variants": [
-          {"file": "stone_01.jpg", "weight": 4},
-          {"file": "stone_02.jpg", "weight": 2}
+          { "file": "stone_01.png", "weight": 4 },
+          { "file": "stone_02.png", "weight": 2 }
         ],
-        "randomization": {
-          "rotation": [0, 90, 180, 270],
-          "flip_x": true
-        }
+        "randomization": { "rotation": [0, 90, 180, 270], "flip_x": true }
       }
     }
   }
 }
 ```
 
-Example ruleset fragment:
+## Local development
 
-```json
-{
-  "asset_collections": {"terrain": "terrain"},
-  "rules": [
-    {
-      "geometry": ["Polygon", "MultiPolygon"],
-      "filter": {"kind": "park"},
-      "symbolizer": {
-        "type": "polygon_pattern",
-        "asset": "terrain.stone-floor",
-        "size_px": 32,
-        "spacing_px": 32
-      }
-    }
-  ]
-}
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn georender_service.app:app --reload
 ```
 
-Variant selection is deterministic, based on the placement position and rule context, so neighboring tiles stay visually stable instead of re-rolling every request.
+## Cache
 
-## Rulesets
+Rendered tiles and images are cached on disk under `cache/`. The cache key includes the map slug, source revision, ruleset revision, and renderer version — so edits to a ruleset or timeline file automatically invalidate affected entries. To bust everything, bump `RENDERER_REVISION` in `georender_service/app.py`.
 
-Rulesets still live in `rulesets/<name>.json`.
+## License
 
-Supported symbolizers:
-
-- `icon`
-- `polygon_fill`
-- `polygon_pattern`
-- `line_pattern`
-
-Lines are rendered as repeated rotated stamps along the geometry, then clipped through a buffered mask. That is the bit that keeps rivers, roads, and walls from looking like badly stretched stickers.
-
-## Cache behavior
-
-Named map tiles and images are cached on disk under `cache/`.
-
-The cache key includes:
-
-- map slug
-- source revision
-- ruleset revision
-- renderer version
-- tile coordinates or image parameters
-
-Ad hoc POST renders are cached separately by body hash and render parameters.
-
-## Current limits
-
-- PostGIS expects a common geometry column name, defaulting to `geom`.
-- PostGIS cache invalidation is config-based unless you also version the source explicitly with `revision` in the timeline file.
-- MVT mode depends on `mapbox-vector-tile` and a usable `tile_url_template`.
-- There is still no label engine.
-- Edge fading is blurred-mask based, not a true distance field.
-
-## Demo assets included
-
-The repo includes a local `demo` map wired to `example.geojson`, so the named routes work immediately after install.
+Apache 2.0 — see [LICENSE](LICENSE).
