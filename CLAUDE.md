@@ -9,15 +9,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Install
+# Install (dev, includes pytest)
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
 # Run (dev)
 uvicorn georender_service.app:app --reload
 
-# Run tests (none exist yet; run individual checks with)
-python -m py_compile georender_service/*.py
+# Run tests
+pytest
+
+# Run a single test file
+pytest tests/test_engine.py
+
+# Run with coverage
+pytest --cov --cov-report=term-missing
 ```
 
 ## Architecture
