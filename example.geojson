@@ -1,0 +1,72 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"kind": "park", "name": "North Park"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [11.327, 44.501],
+          [11.333, 44.501],
+          [11.334, 44.506],
+          [11.329, 44.509],
+          [11.325, 44.506],
+          [11.327, 44.501]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"kind": "water", "name": "Lake"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [11.338, 44.498],
+          [11.345, 44.499],
+          [11.347, 44.504],
+          [11.341, 44.506],
+          [11.337, 44.502],
+          [11.338, 44.498]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"kind": "river", "name": "Canal"},
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [11.322, 44.497],
+          [11.327, 44.500],
+          [11.333, 44.503],
+          [11.339, 44.507],
+          [11.347, 44.510]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"kind": "road", "name": "Main Road"},
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [11.324, 44.510],
+          [11.331, 44.507],
+          [11.339, 44.505],
+          [11.346, 44.501]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"kind": "city", "name": "Alpha"},
+      "geometry": {"type": "Point", "coordinates": [11.336, 44.504]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"kind": "town", "name": "Beta"},
+      "geometry": {"type": "Point", "coordinates": [11.328, 44.5035]}
+    }
+  ]
+}

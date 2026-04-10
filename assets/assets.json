@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "collections": {
+    "demo": {
+      "forest_tree": {
+        "kind": "variant_set",
+        "variants": [
+          {
+            "file": "tree.png",
+            "weight": 1
+          }
+        ],
+        "randomization": {
+          "rotation": [
+            0,
+            90,
+            180,
+            270
+          ],
+          "flip_x": true,
+          "brightness_jitter": 0.05
+        }
+      },
+      "river_wave": {
+        "file": "wave.png",
+        "kind": "sprite"
+      },
+      "road_dash": {
+        "file": "dash.png",
+        "kind": "sprite",
+        "randomization": {
+          "rotation": [
+            0,
+            180
+          ],
+          "brightness_jitter": 0.03
+        }
+      },
+      "settlement": {
+        "file": "town.png",
+        "kind": "sprite"
+      }
+    }
+  }
+}

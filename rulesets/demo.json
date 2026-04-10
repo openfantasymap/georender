@@ -1,0 +1,118 @@
+{
+  "name": "demo",
+  "background": "#f7fbff",
+  "asset_collections": {
+    "demo": "demo"
+  },
+  "rules": [
+    {
+      "name": "parks",
+      "z_index": 1,
+      "geometry": [
+        "Polygon",
+        "MultiPolygon"
+      ],
+      "filter": {
+        "kind": "park"
+      },
+      "symbolizer": {
+        "type": "polygon_pattern",
+        "asset": "demo.forest_tree",
+        "size_px": 20,
+        "spacing_px": 34,
+        "opacity": 0.9
+      },
+      "edge_fade": {
+        "distance_px": 12
+      }
+    },
+    {
+      "name": "water",
+      "z_index": 2,
+      "geometry": [
+        "Polygon",
+        "MultiPolygon"
+      ],
+      "filter": {
+        "kind": "water"
+      },
+      "symbolizer": {
+        "type": "polygon_fill",
+        "fill": "#9fd7ffcc"
+      },
+      "edge_fade": {
+        "distance_px": 10
+      }
+    },
+    {
+      "name": "rivers",
+      "z_index": 3,
+      "geometry": [
+        "LineString",
+        "MultiLineString"
+      ],
+      "filter": {
+        "kind": "river"
+      },
+      "symbolizer": {
+        "type": "line_pattern",
+        "asset": "demo.river_wave",
+        "size_px": 18,
+        "spacing_px": 18,
+        "buffer_px": 14,
+        "cross_step_px": 10,
+        "rotate": true,
+        "opacity": 0.95
+      },
+      "edge_fade": {
+        "distance_px": 8
+      }
+    },
+    {
+      "name": "roads",
+      "z_index": 4,
+      "geometry": [
+        "LineString",
+        "MultiLineString"
+      ],
+      "filter": {
+        "kind": "road"
+      },
+      "symbolizer": {
+        "type": "line_pattern",
+        "asset": "demo.road_dash",
+        "size_px": 16,
+        "spacing_px": 14,
+        "buffer_px": 10,
+        "cross_step_px": 10,
+        "rotate": true,
+        "opacity": 0.85
+      },
+      "edge_fade": {
+        "distance_px": 6
+      }
+    },
+    {
+      "name": "cities",
+      "z_index": 5,
+      "geometry": [
+        "Point",
+        "MultiPoint"
+      ],
+      "filter": {
+        "kind": {
+          "in": [
+            "city",
+            "town"
+          ]
+        }
+      },
+      "symbolizer": {
+        "type": "icon",
+        "asset": "demo.settlement",
+        "size_px": 26,
+        "opacity": 1.0
+      }
+    }
+  ]
+}

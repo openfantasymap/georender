@@ -1,0 +1,5 @@
+{
+  "alien": {
+    "dsn": "postgresql://user:password@localhost:5432/alien"
+  }
+}
