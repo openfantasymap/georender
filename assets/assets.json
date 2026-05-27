@@ -40,6 +40,16 @@
         "file": "town.png",
         "kind": "sprite"
       }
+    },
+    "valle_trebba": {
+      "aerofoto_1976": {
+        "file": "github://openhistorymap/valle_trebba@HEAD/backgrounds/rer_1976_78.jpg",
+        "kind": "sprite"
+      },
+      "ferrara_1814": {
+        "file": "github://openhistorymap/valle_trebba@HEAD/backgrounds/Territorio_ferrarese_1814.png",
+        "kind": "sprite"
+      }
     }
   }
 }

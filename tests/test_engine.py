@@ -213,3 +213,264 @@ def test_demo_renderer_renders_png():
     assert data[:8] == PNG_SIGNATURE
     img = Image.open(__import__("io").BytesIO(data))
     assert img.size == (256, 256)
+
+
+# ---------------------------------------------------------------------------
+# polygon_texture symbolizer
+# ---------------------------------------------------------------------------
+
+
+def _polygon_texture_ruleset(tile_ref, **extra):
+    symbolizer = {"type": "polygon_texture", "asset": tile_ref, "tile_size_px": 16}
+    symbolizer.update(extra)
+    return {
+        "name": "texture",
+        "background": "#00000000",
+        "asset_collections": {"test": "test"},
+        "rules": [
+            {
+                "name": "ground",
+                "z_index": 1,
+                "geometry": ["Polygon", "MultiPolygon"],
+                "filter": {"kind": "water"},
+                "symbolizer": symbolizer,
+            }
+        ],
+    }
+
+
+def test_polygon_texture_renders_pixels_inside_polygon(tmp_ruleset_dir, tmp_assets):
+    (tmp_ruleset_dir / "texture.json").write_text(
+        json.dumps(_polygon_texture_ruleset("test.marker")), encoding="utf-8"
+    )
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets)
+    data = renderer.render_png(SIMPLE_GEOJSON, "texture", width=128, height=128)
+    img = Image.open(__import__("io").BytesIO(data))
+    # Some pixels should now be opaque (the polygon interior), not background.
+    alphas = [px[3] for px in img.getdata()]
+    assert any(a > 0 for a in alphas)
+
+
+def test_polygon_texture_is_deterministic_across_renders(tmp_ruleset_dir, tmp_assets):
+    (tmp_ruleset_dir / "texture.json").write_text(
+        json.dumps(_polygon_texture_ruleset("test.marker", rotation=True)),
+        encoding="utf-8",
+    )
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets)
+    first = renderer.render_png(SIMPLE_GEOJSON, "texture", width=64, height=64)
+    second = renderer.render_png(SIMPLE_GEOJSON, "texture", width=64, height=64)
+    assert first == second  # same seed → same bytes
+
+
+def test_polygon_texture_tint_changes_output(tmp_ruleset_dir, tmp_assets):
+    base_def = _polygon_texture_ruleset("test.marker")
+    tinted_def = _polygon_texture_ruleset("test.marker", tint="#ff000080")
+    (tmp_ruleset_dir / "base.json").write_text(json.dumps(base_def), encoding="utf-8")
+    (tmp_ruleset_dir / "tinted.json").write_text(json.dumps(tinted_def), encoding="utf-8")
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets)
+    base = renderer.render_png(SIMPLE_GEOJSON, "base", width=64, height=64)
+    tinted = renderer.render_png(SIMPLE_GEOJSON, "tinted", width=64, height=64)
+    assert base != tinted  # tint must have observable effect
+
+
+def test_polygon_texture_missing_asset_is_silent(tmp_ruleset_dir, tmp_assets):
+    """A rule with an empty/missing `asset` should leave the canvas as background,
+    not crash the render."""
+    ruleset_def = _polygon_texture_ruleset("test.marker")
+    ruleset_def["rules"][0]["symbolizer"].pop("asset")
+    (tmp_ruleset_dir / "noasset.json").write_text(json.dumps(ruleset_def), encoding="utf-8")
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets)
+    data = renderer.render_png(SIMPLE_GEOJSON, "noasset", width=32, height=32)
+    assert data[:8] == PNG_SIGNATURE
+
+
+def test_resolve_texture_rotation_handles_all_specs():
+    from georender_service.engine import _resolve_texture_rotation, _stable_hash
+
+    seed = _stable_hash("anything")
+    assert _resolve_texture_rotation(0, seed) == 0.0
+    assert _resolve_texture_rotation(None, seed) == 0.0
+    assert _resolve_texture_rotation(False, seed) == 0.0
+    assert _resolve_texture_rotation(45, seed) == 45.0
+    assert _resolve_texture_rotation(True, seed) in {0.0, 90.0, 180.0, 270.0}
+    assert _resolve_texture_rotation([15, 30, 45], seed) in {15.0, 30.0, 45.0}
+    assert _resolve_texture_rotation([], seed) == 0.0
+
+
+def test_apply_tint_with_zero_alpha_is_noop():
+    from georender_service.engine import _apply_tint
+
+    layer = Image.new("RGBA", (4, 4), (100, 150, 200, 255))
+    out = _apply_tint(layer, (255, 0, 0, 0))
+    assert list(out.getdata()) == list(layer.getdata())
+
+
+# ---------------------------------------------------------------------------
+# Remote assets via github:// + http(s)://
+# ---------------------------------------------------------------------------
+
+
+def test_expand_github_uri_basic():
+    from georender_service.engine import _expand_github_uri
+
+    assert _expand_github_uri("github://alice/world/path/to/tex.png") == (
+        "https://cdn.jsdelivr.net/gh/alice/world@HEAD/path/to/tex.png"
+    )
+    assert _expand_github_uri("github://alice/world@v1.2/textures/dirt.png") == (
+        "https://cdn.jsdelivr.net/gh/alice/world@v1.2/textures/dirt.png"
+    )
+
+
+def test_expand_github_uri_rejects_malformed():
+    from georender_service.engine import _expand_github_uri
+
+    with pytest.raises(ValueError):
+        _expand_github_uri("github://no-repo-here")
+    with pytest.raises(ValueError):
+        _expand_github_uri("github://owner/repo")  # missing path
+
+
+def test_asset_store_resolve_short_circuits_for_urls(tmp_assets):
+    store = AssetStore(tmp_assets)
+    resolved_id, asset_def = store.resolve("github://alice/world/x.png", None)
+    assert resolved_id.startswith("url:")
+    assert asset_def == {"file": "github://alice/world/x.png"}
+
+    resolved_id, asset_def = store.resolve("https://example.com/x.png", None)
+    assert resolved_id.startswith("url:")
+
+
+def test_asset_store_remote_without_cache_raises(tmp_assets):
+    store = AssetStore(tmp_assets)  # no cache_dir
+    with pytest.raises(FileNotFoundError, match="no cache_dir"):
+        store.load_for_ruleset("https://example.com/x.png", None)
+
+
+def _png_bytes(color=(20, 220, 80, 255)):
+    """Build a tiny solid-colour PNG for the network stub to return."""
+    import io as _io
+    buf = _io.BytesIO()
+    Image.new("RGBA", (8, 8), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_asset_store_downloads_and_caches_http(tmp_assets, tmp_path, monkeypatch):
+    """Remote asset fetched once, then served from the on-disk cache."""
+    import georender_service.engine as engine_mod
+
+    payload = _png_bytes()
+    calls: list[str] = []
+
+    class _Resp:
+        status_code = 200
+        content = payload
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, *args, **kwargs):
+        calls.append(url)
+        return _Resp()
+
+    # Patch httpx.get inside the engine module — _fetch_remote_asset does a local import.
+    import httpx as _httpx
+    monkeypatch.setattr(_httpx, "get", fake_get)
+
+    cache_dir = tmp_path / "cache"
+    store = AssetStore(tmp_assets, cache_dir=cache_dir)
+
+    img1 = store.load_for_ruleset(
+        "https://example.com/textures/dirt.png", None, size_px=8,
+    )
+    img2 = store.load_for_ruleset(
+        "https://example.com/textures/dirt.png", None, size_px=8,
+    )
+    assert isinstance(img1, Image.Image) and isinstance(img2, Image.Image)
+    assert len(calls) == 1  # second call must come from disk cache
+    cached = list((cache_dir / "assets").iterdir())
+    assert len(cached) == 1
+    assert cached[0].suffix == ".png"
+
+
+def test_asset_store_github_uri_routes_through_jsdelivr(tmp_assets, tmp_path, monkeypatch):
+    """A `github://` reference must end up hitting the matching jsDelivr URL."""
+    payload = _png_bytes((200, 50, 50, 255))
+    received_urls: list[str] = []
+
+    class _Resp:
+        status_code = 200
+        content = payload
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, *args, **kwargs):
+        received_urls.append(url)
+        return _Resp()
+
+    import httpx as _httpx
+    monkeypatch.setattr(_httpx, "get", fake_get)
+
+    store = AssetStore(tmp_assets, cache_dir=tmp_path / "cache")
+    img = store.load_for_ruleset(
+        "github://openhistorymap/valle_trebba@HEAD/backgrounds/rer_1976_78.png",
+        None,
+        size_px=8,
+    )
+    assert isinstance(img, Image.Image)
+    assert received_urls == [
+        "https://cdn.jsdelivr.net/gh/openhistorymap/valle_trebba@HEAD/backgrounds/rer_1976_78.png"
+    ]
+
+
+def test_asset_store_remote_through_registry(tmp_assets, tmp_path, monkeypatch):
+    """A collection entry whose `file` is a URL should pull that URL too."""
+    import json as _json
+
+    payload = _png_bytes()
+
+    class _Resp:
+        status_code = 200
+        content = payload
+        def raise_for_status(self):
+            return None
+
+    import httpx as _httpx
+    monkeypatch.setattr(_httpx, "get", lambda url, *a, **kw: _Resp())
+
+    registry = _json.loads((tmp_assets / "assets.json").read_text())
+    registry["collections"]["remote"] = {
+        "aerofoto": {"file": "github://alice/world/backgrounds/aerial.png"}
+    }
+    (tmp_assets / "assets.json").write_text(_json.dumps(registry))
+
+    store = AssetStore(tmp_assets, cache_dir=tmp_path / "cache")
+    img = store.load_for_ruleset("remote.aerofoto", {"remote": "remote"}, size_px=8)
+    assert isinstance(img, Image.Image)
+
+
+def test_asset_store_remote_fetch_failure_raises_filenotfound(tmp_assets, tmp_path, monkeypatch):
+    import httpx as _httpx
+
+    def raising_get(*args, **kwargs):
+        raise _httpx.ConnectError("boom")
+
+    monkeypatch.setattr(_httpx, "get", raising_get)
+    store = AssetStore(tmp_assets, cache_dir=tmp_path / "cache")
+    with pytest.raises(FileNotFoundError, match="Failed to fetch remote asset"):
+        store.load_for_ruleset("https://example.com/x.png", None)
+
+
+def test_asset_store_overlay_collections_shadow_disk(tmp_assets):
+    store = AssetStore(tmp_assets)
+    # marker exists on disk under "test"; the overlay re-defines it.
+    store.register_overlay({"override": {"marker": {"file": "tile.png"}}})
+    resolved_id, asset_def = store.resolve("override.marker", {"override": "override"})
+    assert resolved_id == "override.marker"
+    assert asset_def == {"file": "tile.png"}
+
+
+def test_asset_store_clear_overlay_restores_disk_only(tmp_assets):
+    store = AssetStore(tmp_assets)
+    store.register_overlay({"shadow": {"x": {"file": "tile.png"}}})
+    store.clear_overlay()
+    with pytest.raises(FileNotFoundError):
+        store.resolve("shadow.x", {"shadow": "shadow"})

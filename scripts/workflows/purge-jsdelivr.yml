@@ -1,0 +1,119 @@
+# Purge the jsDelivr CDN for all tracked files at HEAD on every push.
+#
+# WHY THIS EXISTS
+#   jsDelivr edge-caches `cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/...` for
+#   12 hours after first fetch. When a geocontext repo's georender.json,
+#   ruleset, or texture changes, downstream renderers keep seeing the stale
+#   copy until the cache expires (or until a manual purge is triggered).
+#   This workflow runs that purge automatically on push.
+#
+# HOW TO USE
+#   Copy this file into your geocontext repo as:
+#       .github/workflows/purge-jsdelivr.yml
+#
+#   No edits needed — it picks up `${{ github.repository }}` and
+#   `${{ github.ref_name }}` from the workflow context, so the same file
+#   works in every repo.
+#
+# WHAT IT DOES
+#   1. Lists every file tracked by git at the pushed commit.
+#   2. Builds purge URLs for both `@HEAD` and `@<branch>` (jsDelivr caches
+#      each ref form independently).
+#   3. Submits them to https://purge.jsdelivr.net/ in batches of 100
+#      (the bulk endpoint's documented limit).
+#
+# COST: typically <10s for a repo with a few hundred files; one CI minute
+# per push. Safe to run on repos with binary assets — purge is a no-op for
+# files jsDelivr never cached.
+
+name: Purge jsDelivr CDN
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      extra_ref:
+        description: "Additional ref to purge (e.g. a tag or commit SHA). Optional."
+        required: false
+        default: ""
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pushed commit
+        uses: actions/checkout@v4
+
+      - name: Purge jsDelivr for every tracked file
+        env:
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          EXTRA_REF: ${{ github.event.inputs.extra_ref }}
+        run: |
+          set -euo pipefail
+
+          # Refs to purge. jsDelivr caches `@HEAD` and `@<branch>` as separate
+          # entries, so we hit both. EXTRA_REF lets a manual run target a tag
+          # or commit SHA too.
+          REFS=("HEAD" "$BRANCH")
+          if [ -n "${EXTRA_REF:-}" ]; then
+            REFS+=("$EXTRA_REF")
+          fi
+          # Dedupe (the default branch's ref_name often equals HEAD already).
+          mapfile -t REFS < <(printf "%s\n" "${REFS[@]}" | awk 'NF && !seen[$0]++')
+
+          mapfile -t FILES < <(git ls-files)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "No tracked files; nothing to purge."
+            exit 0
+          fi
+
+          # Build the full path list as `/gh/<owner>/<repo>@<ref>/<file>`.
+          paths=()
+          for ref in "${REFS[@]}"; do
+            for f in "${FILES[@]}"; do
+              paths+=("/gh/$REPO@$ref/$f")
+            done
+          done
+
+          total=${#paths[@]}
+          echo "Purging $total paths across refs: ${REFS[*]}"
+
+          # jsDelivr's bulk purge endpoint accepts up to 100 paths per request.
+          BATCH=100
+          i=0
+          failures=0
+          while [ $i -lt $total ]; do
+            chunk=("${paths[@]:$i:$BATCH}")
+            payload=$(printf '%s\n' "${chunk[@]}" | jq -R . | jq -sc '{path: .}')
+
+            end=$((i + ${#chunk[@]}))
+            echo "  batch $((i + 1))-$end / $total"
+
+            http_code=$(curl -sS -o /tmp/purge.out -w "%{http_code}" \
+              -X POST \
+              -H "cache-control: no-cache" \
+              -H "content-type: application/json" \
+              -d "$payload" \
+              https://purge.jsdelivr.net/) || http_code=000
+
+            if [ "$http_code" != "200" ] && [ "$http_code" != "202" ]; then
+              echo "    WARN: HTTP $http_code"
+              head -c 400 /tmp/purge.out || true
+              echo
+              failures=$((failures + 1))
+            else
+              jq -r '"    job=" + (.id // "?") + " status=" + (.status // "?")' /tmp/purge.out 2>/dev/null || true
+            fi
+
+            i=$((i + BATCH))
+          done
+
+          if [ $failures -gt 0 ]; then
+            echo "::warning::$failures batch(es) failed; jsDelivr may still serve stale copies for those paths"
+          fi

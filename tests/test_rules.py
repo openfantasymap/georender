@@ -307,3 +307,223 @@ def test_validate_asset_collections_bad_type_raises(tmp_path):
     )
     with pytest.raises(RulesetError, match="asset_collections"):
         store.load("bad")
+
+
+# ---------------------------------------------------------------------------
+# RulesetStore — remote stubs ($remote)
+# ---------------------------------------------------------------------------
+
+
+_REMOTE_RULESET = {
+    "name": "remote",
+    "background": "#0a0a0a",
+    "rules": [
+        {
+            "geometry": ["Polygon", "MultiPolygon"],
+            "filter": {"kind": "water"},
+            "symbolizer": {"type": "polygon_fill", "fill": "#1e90ff80"},
+        }
+    ],
+}
+
+
+def _install_fake_http(monkeypatch, routes):
+    import httpx as _httpx
+
+    class _Resp:
+        def __init__(self, status_code, content):
+            self.status_code = status_code
+            self.content = content
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise _httpx.HTTPStatusError(
+                    f"HTTP {self.status_code}",
+                    request=_httpx.Request("GET", "https://example.invalid/"),
+                    response=self,  # type: ignore[arg-type]
+                )
+
+    def fake_get(url, *args, **kwargs):
+        for prefix, payload in routes.items():
+            if url.startswith(prefix):
+                return _Resp(200, payload)
+        return _Resp(404, b"")
+
+    monkeypatch.setattr(_httpx, "get", fake_get)
+
+
+def test_remote_stub_fetches_and_validates(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "cache"
+    rulesets_dir = tmp_path / "rulesets"
+    rulesets_dir.mkdir()
+    _write_ruleset(
+        rulesets_dir / "vt.json",
+        {"$remote": "github://alice/world@HEAD/ruleset.json"},
+    )
+
+    payload = json.dumps(_REMOTE_RULESET).encode("utf-8")
+    _install_fake_http(
+        monkeypatch,
+        {"https://cdn.jsdelivr.net/gh/alice/world@HEAD/ruleset.json": payload},
+    )
+
+    store = RulesetStore(rulesets_dir, cache_dir=cache_dir)
+    data = store.load("vt")
+    assert data["background"] == "#0a0a0a"
+    assert data["rules"][0]["symbolizer"]["type"] == "polygon_fill"
+    cached_files = list((cache_dir / "rulesets").iterdir())
+    assert len(cached_files) == 1
+
+
+def test_remote_stub_revision_changes_with_upstream(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "cache"
+    rulesets_dir = tmp_path / "rulesets"
+    rulesets_dir.mkdir()
+    stub = {"$remote": "https://example.com/r.json"}
+    _write_ruleset(rulesets_dir / "vt.json", stub)
+
+    v1 = json.dumps(_REMOTE_RULESET).encode("utf-8")
+    _install_fake_http(monkeypatch, {"https://example.com/r.json": v1})
+    rev1 = RulesetStore(rulesets_dir, cache_dir=cache_dir).revision("vt")
+
+    # Bust the cache and serve a different payload.
+    (cache_dir / "rulesets").rename(cache_dir / "rulesets_old")
+    altered = dict(_REMOTE_RULESET)
+    altered["background"] = "#ff0000"
+    v2 = json.dumps(altered).encode("utf-8")
+    _install_fake_http(monkeypatch, {"https://example.com/r.json": v2})
+    rev2 = RulesetStore(rulesets_dir, cache_dir=cache_dir).revision("vt")
+    assert rev1 != rev2
+
+
+def test_remote_stub_uses_in_memory_cache(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "cache"
+    rulesets_dir = tmp_path / "rulesets"
+    rulesets_dir.mkdir()
+    _write_ruleset(rulesets_dir / "vt.json", {"$remote": "https://example.com/r.json"})
+
+    calls: list[str] = []
+    import httpx as _httpx
+
+    class _Resp:
+        status_code = 200
+        content = json.dumps(_REMOTE_RULESET).encode("utf-8")
+
+        def raise_for_status(self):
+            return None
+
+    def counting_get(url, *a, **kw):
+        calls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr(_httpx, "get", counting_get)
+
+    store = RulesetStore(rulesets_dir, cache_dir=cache_dir)
+    store.load("vt")
+    store.load("vt")
+    store.revision("vt")
+    # First call hits the network; subsequent calls must come from the cache.
+    assert len(calls) == 1
+
+
+def test_remote_stub_without_cache_dir_raises(tmp_path):
+    rulesets_dir = tmp_path / "rulesets"
+    rulesets_dir.mkdir()
+    _write_ruleset(rulesets_dir / "vt.json", {"$remote": "https://example.com/r.json"})
+    store = RulesetStore(rulesets_dir)  # no cache_dir
+    with pytest.raises(RulesetError, match="no cache_dir"):
+        store.load("vt")
+
+
+def test_remote_stub_network_failure_keeps_revision_stable(tmp_path, monkeypatch):
+    """Network outage during revision() must not 500 the tile route — fall back
+    to hashing the stub alone so tiles still serve (from their pre-existing cache)."""
+    cache_dir = tmp_path / "cache"
+    rulesets_dir = tmp_path / "rulesets"
+    rulesets_dir.mkdir()
+    _write_ruleset(rulesets_dir / "vt.json", {"$remote": "https://example.com/r.json"})
+
+    import httpx as _httpx
+
+    def raising_get(*args, **kwargs):
+        raise _httpx.ConnectError("offline")
+
+    monkeypatch.setattr(_httpx, "get", raising_get)
+    store = RulesetStore(rulesets_dir, cache_dir=cache_dir)
+    rev = store.revision("vt")
+    assert isinstance(rev, str) and len(rev) == 16
+
+
+def test_remote_stub_unsupported_scheme_raises(tmp_path):
+    rulesets_dir = tmp_path / "rulesets"
+    rulesets_dir.mkdir()
+    _write_ruleset(rulesets_dir / "vt.json", {"$remote": "ftp://example.com/r.json"})
+    store = RulesetStore(rulesets_dir, cache_dir=tmp_path / "cache")
+    with pytest.raises(RulesetError, match="Unsupported"):
+        store.load("vt")
+
+
+def test_extract_remote_pointer_ignores_non_string():
+    from georender_service.rules import _extract_remote_pointer
+
+    assert _extract_remote_pointer(json.dumps({"$remote": 42}).encode()) is None
+    assert _extract_remote_pointer(json.dumps({"$remote": ""}).encode()) is None
+    assert _extract_remote_pointer(b"not json") is None
+    assert _extract_remote_pointer(json.dumps([]).encode()) is None
+
+
+def test_register_inline_takes_precedence_over_disk(tmp_path):
+    rulesets_dir = tmp_path / "rulesets"
+    rulesets_dir.mkdir()
+    on_disk = {
+        "background": "#000000ff",
+        "rules": [{"geometry": ["Polygon"], "symbolizer": {"type": "polygon_fill"}}],
+    }
+    _write_ruleset(rulesets_dir / "vt.json", on_disk)
+
+    inline = {
+        "background": "#ffffffff",
+        "rules": [{"geometry": ["Polygon"], "symbolizer": {"type": "polygon_fill"}}],
+    }
+    store = RulesetStore(rulesets_dir)
+    store.register_inline("vt", inline)
+    assert store.load("vt")["background"] == "#ffffffff"
+
+
+def test_register_inline_lists_in_names(tmp_path):
+    store = RulesetStore(tmp_path)
+    store.register_inline(
+        "adhoc",
+        {"rules": [{"geometry": ["Polygon"], "symbolizer": {"type": "polygon_fill"}}]},
+    )
+    assert "adhoc" in store.list_names()
+
+
+def test_register_inline_revision_is_content_addressed(tmp_path):
+    store = RulesetStore(tmp_path)
+    body = {"rules": [{"geometry": ["Polygon"], "symbolizer": {"type": "polygon_fill"}}]}
+    store.register_inline("a", body)
+    rev1 = store.revision("a")
+    store.register_inline(
+        "a",
+        {"background": "#ff0000", "rules": body["rules"]},
+    )
+    rev2 = store.revision("a")
+    assert rev1 != rev2
+
+
+def test_register_inline_rejects_non_dict(tmp_path):
+    store = RulesetStore(tmp_path)
+    with pytest.raises(RulesetError, match="JSON object"):
+        store.register_inline("bad", [1, 2, 3])  # type: ignore[arg-type]
+
+
+def test_clear_inline_removes_entries(tmp_path):
+    store = RulesetStore(tmp_path)
+    store.register_inline(
+        "x",
+        {"rules": [{"geometry": ["Polygon"], "symbolizer": {"type": "polygon_fill"}}]},
+    )
+    store.clear_inline()
+    with pytest.raises(RulesetError, match="not found"):
+        store.load("x")

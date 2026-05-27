@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
-from shapely.geometry import box
+from pyproj import Transformer
+from shapely.geometry import box, mapping
+from shapely.ops import transform as shapely_transform
 
 from .geometry import (
     ensure_mercator,
@@ -48,9 +53,15 @@ class FetchedFeatures:
 
 
 class SourceStore:
-    def __init__(self, base_dir: str | Path, connections_path: str | Path | None = None):
+    def __init__(
+        self,
+        base_dir: str | Path,
+        connections_path: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+    ):
         self.base_dir = Path(base_dir)
         self.connections_path = Path(connections_path) if connections_path else None
+        self.cache_dir = Path(cache_dir) if cache_dir else None
         self._sources: dict[str, SourceDefinition] | None = None
         self._connections_cache: dict[str, Any] | None = None
 
@@ -100,6 +111,8 @@ class SourceStore:
             return PostGISAdapter(self._load_connections())
         if mode == "mvt":
             return MVTAdapter()
+        if mode == "geocontext":
+            return GeocontextAdapter(cache_dir=self.cache_dir)
         raise SourceError(f"Unsupported source mode: {mode}")
 
     def _load_sources(self) -> dict[str, SourceDefinition]:
@@ -296,6 +309,309 @@ class MVTAdapter:
         return FetchedFeatures(features=features, source_crs="EPSG:3857", revision=revision)
 
 
+class GeocontextAdapter:
+    """Adapter for the geocontext.json format (https://github.com/openhistorymap/geocontext-front).
+
+    Fetches a manifest from `cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/`, resolves the
+    declared `datasources[]` (inline / remote GeoJSON / CSV / derived transforms), and
+    returns the union of features that belong to data-driven layers, tagged with
+    `__layer` and `__source_layer` properties so rulesets can filter on them.
+    """
+
+    JSDELIVR_BASE = "https://cdn.jsdelivr.net/gh"
+    DATA_LAYER_TYPES = {"features", "feature", "markers"}
+    DEFAULT_MANIFEST_CANDIDATES = ("geocontext.json", "gcx.json")
+    DEFAULT_BUNDLE_NAME = "georender.json"
+
+    def __init__(self, cache_dir: str | Path | None = None):
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+
+    def fetch_for_bounds(
+        self,
+        source: SourceDefinition,
+        bounds_3857: tuple[float, float, float, float],
+        *,
+        tile: tuple[int, int, int] | None = None,
+    ) -> FetchedFeatures:
+        cfg = _extract_geocontext_config(source)
+        owner = cfg["owner"]
+        repo = cfg["repo"]
+        ref = cfg.get("ref") or "HEAD"
+        manifest_name = cfg.get("manifest")
+        whitelist = set(cfg.get("layers") or [])
+
+        resolved_ref = self._resolve_ref(owner, repo, ref) or ref
+
+        manifest, manifest_name_used = self._load_manifest(owner, repo, resolved_ref, manifest_name)
+        datasources = self._resolve_datasources(owner, repo, resolved_ref, manifest)
+
+        features: list[dict[str, Any]] = []
+        for layer in manifest.get("layers") or []:
+            layer_type = str(layer.get("type") or "").lower()
+            if layer_type not in self.DATA_LAYER_TYPES:
+                continue
+            layer_name = str(layer.get("name") or "")
+            ds_name = str(layer.get("datasource") or "")
+            if not ds_name or ds_name not in datasources:
+                continue
+            if whitelist and layer_name not in whitelist:
+                continue
+            for feat in datasources[ds_name]:
+                clone = dict(feat)
+                props = dict(clone.get("properties") or {})
+                props["__layer"] = layer_name
+                props["__source_layer"] = ds_name
+                clone["properties"] = props
+                features.append(clone)
+
+        if bounds_3857:
+            query_box = box(*bounds_3857)
+            filtered: list[dict[str, Any]] = []
+            for feat in features:
+                geom = ensure_mercator(load_geom(feat), "EPSG:4326")
+                if geom.is_empty or not geom.intersects(query_box):
+                    continue
+                filtered.append(feat)
+            features = filtered
+
+        revision_seed = f"{owner}/{repo}@{resolved_ref}:{manifest_name_used}"
+        revision = hashlib.sha256(revision_seed.encode("utf-8")).hexdigest()[:16]
+        return FetchedFeatures(features=features, source_crs="EPSG:4326", revision=revision)
+
+    def fetch_render_config(self, source: SourceDefinition) -> dict[str, Any] | None:
+        """Fetch a repo's `georender.json` bundle, if present.
+
+        Schema (matching the in-repo convention):
+
+            {
+              "type": "GeoRender",
+              "version": "1.0",
+              "assets":   "assets/default.json"       // path, OR inline {coll: {...}}
+              "rulesets": {"default": "ruleset.json"} // name -> path, OR inline object
+              "bbox":     [W, S, E, N],               // EPSG:4326, optional
+              "output":   {"width": ..., "height": ..., "padding_px": ...},
+              "geocontext": {"manifest": "...", "layers": [...]}
+            }
+
+        The returned dict has all bare-relative `file` paths inside any inline
+        `assets` block rewritten to absolute `github://<owner>/<repo>@<ref>/...`
+        URIs, and a synthetic `_repo` field carries the resolved repo + ref so
+        downstream loaders can rewrite string-shaped pointers themselves.
+
+        Returns None if the bundle is absent (any HTTP error during fetch).
+        """
+        cfg = _extract_geocontext_config(source)
+        owner = cfg["owner"]
+        repo = cfg["repo"]
+        ref = cfg.get("ref") or "HEAD"
+        resolved_ref = self._resolve_ref(owner, repo, ref) or ref
+        try:
+            payload = self._fetch_repo_asset(owner, repo, resolved_ref, self.DEFAULT_BUNDLE_NAME)
+        except httpx.HTTPError:
+            return None
+        try:
+            data = _loose_json_loads(payload.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SourceError(
+                f"{self.DEFAULT_BUNDLE_NAME} for {owner}/{repo}@{resolved_ref} is not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(data, dict):
+            raise SourceError(
+                f"{self.DEFAULT_BUNDLE_NAME} for {owner}/{repo}@{resolved_ref} must be a JSON object"
+            )
+        data["_repo"] = {"owner": owner, "repo": repo, "ref": resolved_ref}
+        if isinstance(data.get("assets"), dict):
+            data["assets"] = _rewrite_files_to_github(data["assets"], owner, repo, resolved_ref)
+        return data
+
+    # ------------------------------------------------------------------
+    # HTTP / cache helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_ref(self, owner: str, repo: str, ref: str) -> str | None:
+        """Try to resolve a branch/HEAD to a short commit SHA via the GitHub API.
+
+        Returns None on any failure — callers fall back to the literal ref.
+        """
+        try:
+            url = f"https://api.github.com/repos/{owner}/{repo}/commits/{ref}"
+            response = httpx.get(
+                url,
+                timeout=10.0,
+                follow_redirects=True,
+                headers={"Accept": "application/vnd.github+json"},
+            )
+            if response.status_code != 200:
+                return None
+            sha = response.json().get("sha")
+            return sha[:12] if sha else None
+        except Exception:
+            return None
+
+    def _fetch_repo_asset(self, owner: str, repo: str, ref: str, path: str) -> bytes:
+        cache = self._cache_path(owner, repo, ref, path)
+        if cache is not None and cache.exists():
+            return cache.read_bytes()
+        url = f"{self.JSDELIVR_BASE}/{owner}/{repo}@{ref}/{path.lstrip('/')}"
+        data = self._http_get_bytes(url)
+        if cache is not None:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(data)
+        return data
+
+    def _fetch_asset_path(self, owner: str, repo: str, ref: str, path: str) -> bytes:
+        """Resolve a datasource/media path per FORMAT.md §9 and fetch its bytes."""
+        if not path:
+            raise SourceError("geocontext datasource path is empty")
+        if path.startswith("http://") or path.startswith("https://"):
+            return self._http_get_bytes(path)
+        if path.startswith("//"):
+            return self._http_get_bytes("https:" + path)
+        if path.startswith("/"):
+            parts = path.lstrip("/").split("/")
+            # Cross-repo form: /<otherUser>/<otherProject>[@<ref>]/assets/...
+            if len(parts) >= 3 and parts[2] == "assets":
+                other_owner = parts[0]
+                other_repo_ref = parts[1]
+                if "@" in other_repo_ref:
+                    other_repo, other_ref = other_repo_ref.split("@", 1)
+                else:
+                    other_repo, other_ref = other_repo_ref, "HEAD"
+                other_path = "/".join(parts[2:])
+                return self._fetch_repo_asset(other_owner, other_repo, other_ref, other_path)
+            return self._fetch_repo_asset(owner, repo, ref, "/".join(parts))
+        return self._fetch_repo_asset(owner, repo, ref, path)
+
+    def _http_get_bytes(self, url: str) -> bytes:
+        response = httpx.get(url, timeout=30.0, follow_redirects=True)
+        response.raise_for_status()
+        return response.content
+
+    def _cache_path(self, owner: str, repo: str, ref: str, rel: str) -> Path | None:
+        if not self.cache_dir:
+            return None
+        safe_rel = rel.replace("..", "").lstrip("/")
+        if not safe_rel:
+            return None
+        return self.cache_dir / "geocontext" / owner / repo / ref / safe_rel
+
+    # ------------------------------------------------------------------
+    # Manifest + datasource resolution
+    # ------------------------------------------------------------------
+
+    def _load_manifest(
+        self,
+        owner: str,
+        repo: str,
+        ref: str,
+        manifest_name: str | None,
+    ) -> tuple[dict[str, Any], str]:
+        # When the user pinned an explicit name we surface any error; for the default
+        # probe sequence we keep trying the next candidate on any HTTP failure (jsDelivr
+        # returns 404 for missing assets but 502 once that 404 has been edge-cached).
+        if manifest_name:
+            candidates: tuple[str, ...] = (manifest_name,)
+            tolerant = False
+        else:
+            candidates = self.DEFAULT_MANIFEST_CANDIDATES
+            tolerant = True
+
+        last_error: Exception | None = None
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                data = self._fetch_repo_asset(owner, repo, ref, candidate)
+                return json.loads(data.decode("utf-8")), candidate
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                if tolerant:
+                    continue
+                if exc.response is not None and exc.response.status_code == 404:
+                    continue
+                raise SourceError(f"Failed to fetch geocontext manifest '{candidate}': {exc}") from exc
+            except httpx.HTTPError as exc:
+                last_error = exc
+                if tolerant:
+                    continue
+                raise SourceError(f"Failed to fetch geocontext manifest '{candidate}': {exc}") from exc
+            except json.JSONDecodeError as exc:
+                raise SourceError(
+                    f"geocontext manifest '{candidate}' is not valid JSON: {exc}"
+                ) from exc
+        raise SourceError(
+            f"No geocontext manifest found for {owner}/{repo}@{ref} "
+            f"(tried {', '.join(c for c in candidates if c)})"
+        ) from last_error
+
+    def _resolve_datasources(
+        self,
+        owner: str,
+        repo: str,
+        ref: str,
+        manifest: dict[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        declared = [ds for ds in (manifest.get("datasources") or []) if ds.get("name")]
+        resolved: dict[str, list[dict[str, Any]]] = {}
+        pending = list(declared)
+        # Iterate in dependency-order waves; bound by the number of declared datasources
+        # to guarantee termination even on circular transform.from references.
+        for _ in range(len(declared) + 1):
+            if not pending:
+                break
+            still: list[dict[str, Any]] = []
+            progressed = False
+            for ds in pending:
+                name = str(ds["name"])
+                ds_type = str(ds.get("type") or "").lower()
+                conf = ds.get("conf") or {}
+                try:
+                    if ds_type == "geojson":
+                        fc = conf.get("data") or {}
+                        resolved[name] = list(fc.get("features") or [])
+                        progressed = True
+                    elif ds_type == "geojson+http+remote":
+                        payload = self._fetch_asset_path(owner, repo, ref, conf.get("source") or "")
+                        fc = json.loads(payload.decode("utf-8"))
+                        resolved[name] = list(fc.get("features") or [])
+                        progressed = True
+                    elif ds_type == "csv":
+                        resolved[name] = _csv_to_features(
+                            conf.get("data") or "", conf.get("structure") or []
+                        )
+                        progressed = True
+                    elif ds_type == "csv+http+remote":
+                        payload = self._fetch_asset_path(owner, repo, ref, conf.get("source") or "")
+                        resolved[name] = _csv_to_features(
+                            payload.decode("utf-8"), conf.get("structure") or []
+                        )
+                        progressed = True
+                    elif ds_type == "transform":
+                        parent = str(conf.get("from") or "")
+                        if parent not in resolved:
+                            still.append(ds)
+                            continue
+                        resolved[name] = _apply_transforms(
+                            resolved[parent], list(conf.get("transforms") or [])
+                        )
+                        progressed = True
+                    else:
+                        # Per FORMAT.md, unknown datasource types are skipped silently.
+                        resolved[name] = []
+                        progressed = True
+                except SourceError:
+                    raise
+                except Exception:
+                    # A broken individual datasource should not invalidate the whole map.
+                    resolved[name] = []
+                    progressed = True
+            pending = still
+            if not progressed:
+                # Circular or unresolved transforms — drop them.
+                break
+        return resolved
+
+
 def _slug_for_source(data: dict[str, Any], path: Path) -> str:
     default_slug = path.parent.name if path.name == "timeline.json" else path.stem
     raw = str(data.get("url") or default_slug)
@@ -351,6 +667,242 @@ def _collect_tables(data: dict[str, Any]) -> list[dict[str, str]]:
     if (data.get("tracks") or {}).get("table") and data["tracks"]["table"] not in names:
         names.append(str(data["tracks"]["table"]))
     return [{"name": name, "geometry_column": default_geom} for name in names]
+
+
+_METERS_PER_UNIT = {
+    "meters": 1.0,
+    "metres": 1.0,
+    "meter": 1.0,
+    "metre": 1.0,
+    "kilometers": 1000.0,
+    "kilometres": 1000.0,
+    "km": 1000.0,
+    "miles": 1609.344,
+    "mile": 1609.344,
+    "feet": 0.3048,
+    "ft": 0.3048,
+}
+
+
+def _loose_json_loads(text: str) -> Any:
+    """Parse JSON tolerating // and /* */ comments and trailing commas.
+
+    Used for `georender.json` only — every other config in the repo (rulesets,
+    timeline.json, geocontext manifests) stays strict JSON. This loose mode
+    exists because `georender.json` is hand-edited config that benefits from
+    inline comments, and the in-repo convention already uses them.
+    """
+    return json.loads(_strip_trailing_commas(_strip_json_comments(text)))
+
+
+def _strip_json_comments(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            # Consume a string literal verbatim (including escaped quotes) so
+            # that `//` and `/*` inside URLs don't get clobbered.
+            out.append(ch)
+            i += 1
+            while i < n:
+                out.append(text[i])
+                if text[i] == "\\" and i + 1 < n:
+                    out.append(text[i + 1])
+                    i += 2
+                    continue
+                if text[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2  # consume the closing */
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    import re
+
+    return re.sub(r",(\s*[\]}])", r"\1", text)
+
+
+def _rewrite_files_to_github(
+    obj: Any,
+    owner: str,
+    repo: str,
+    ref: str,
+) -> Any:
+    """Walk `obj` and rewrite every `"file": "..."` value that's a bare-relative
+    path (no `://` scheme, no leading slash, no `github://` prefix) into the
+    explicit `github://<owner>/<repo>@<ref>/<path>` form.
+
+    Lets a `georender.json` author write `"file": "backgrounds/photo.jpg"` and
+    have it resolve to a real CDN URL the AssetStore can fetch.
+    """
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            if k == "file" and isinstance(v, str):
+                out[k] = _maybe_rewrite_path(v, owner, repo, ref)
+            else:
+                out[k] = _rewrite_files_to_github(v, owner, repo, ref)
+        return out
+    if isinstance(obj, list):
+        return [_rewrite_files_to_github(item, owner, repo, ref) for item in obj]
+    return obj
+
+
+def _maybe_rewrite_path(value: str, owner: str, repo: str, ref: str) -> str:
+    if not value:
+        return value
+    if value.startswith(("http://", "https://", "github://")):
+        return value
+    if value.startswith("//"):
+        return "https:" + value
+    return f"github://{owner}/{repo}@{ref}/{value.lstrip('/')}"
+
+
+def _extract_geocontext_config(source: SourceDefinition) -> dict[str, Any]:
+    data = source.data
+    connection = data.get("connection") or {}
+    owner = data.get("owner") or connection.get("owner")
+    repo = data.get("repo") or connection.get("repo")
+    combined = data.get("repository") or connection.get("repository")
+    if combined and not (owner and repo) and "/" in str(combined):
+        owner, _, repo = str(combined).partition("/")
+    if not owner or not repo:
+        raise SourceError(
+            f"Map '{source.slug}' is in geocontext mode but owner/repo are missing "
+            f"(set top-level 'owner' and 'repo', or 'repository': '<owner>/<repo>')"
+        )
+    return {
+        "owner": str(owner),
+        "repo": str(repo),
+        "ref": data.get("ref") or connection.get("ref"),
+        "manifest": data.get("manifest") or connection.get("manifest"),
+        "layers": data.get("layers") or data.get("relatedLayers"),
+    }
+
+
+def _csv_to_features(csv_text: str, structure: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not csv_text.strip():
+        return []
+    lat_col: str | None = None
+    lon_col: str | None = None
+    type_hints: dict[str, str] = {}
+    for col in structure or []:
+        name = col.get("column")
+        if not name:
+            continue
+        tags = col.get("tags") or []
+        if col.get("type"):
+            type_hints[name] = str(col["type"])
+        if "gcx:lat" in tags:
+            lat_col = name
+        if "gcx:lon" in tags:
+            lon_col = name
+    if not lat_col or not lon_col:
+        # FORMAT.md mandates at least one gcx:lat + one gcx:lon column.
+        return []
+    reader = csv.DictReader(io.StringIO(csv_text))
+    features: list[dict[str, Any]] = []
+    for row in reader:
+        try:
+            lat = float(row.get(lat_col, "") or "")
+            lon = float(row.get(lon_col, "") or "")
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(lat) and math.isfinite(lon)):
+            continue
+        props: dict[str, Any] = dict(row)
+        for key, hint in type_hints.items():
+            if hint == "number" and key in props:
+                try:
+                    props[key] = float(props[key])
+                except (TypeError, ValueError):
+                    pass
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": props,
+            }
+        )
+    return features
+
+
+def _apply_transforms(
+    features: list[dict[str, Any]],
+    steps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = [f for f in features if f.get("geometry")]
+    for step in steps or []:
+        step_type = str(step.get("type") or "").lower()
+        try:
+            if step_type == "buffer":
+                out = _buffer_features(out, step)
+            # Unknown step types are skipped silently (FORMAT.md §3).
+        except Exception:
+            # A broken step yields the previous step's output unchanged.
+            continue
+    return out
+
+
+def _buffer_features(
+    features: list[dict[str, Any]],
+    params: dict[str, Any],
+) -> list[dict[str, Any]]:
+    try:
+        radius = float(params.get("radius") or 0)
+    except (TypeError, ValueError):
+        return features
+    if radius == 0:
+        return features
+    units = str(params.get("units") or "meters").lower()
+    try:
+        steps = int(params.get("steps") or 8)
+    except (TypeError, ValueError):
+        steps = 8
+
+    meters = _METERS_PER_UNIT.get(units)
+    to_mercator = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True).transform
+    to_lonlat = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform
+
+    buffered: list[dict[str, Any]] = []
+    for feat in features:
+        try:
+            geom = load_geom(feat)
+            if geom.is_empty:
+                continue
+            if meters is not None:
+                merc = shapely_transform(to_mercator, geom)
+                merc_buf = merc.buffer(radius * meters, quad_segs=steps)
+                if merc_buf.is_empty:
+                    continue
+                out_geom = shapely_transform(to_lonlat, merc_buf)
+            else:
+                size = math.degrees(radius) if units == "radians" else radius
+                out_geom = geom.buffer(size, quad_segs=steps)
+                if out_geom.is_empty:
+                    continue
+            clone = dict(feat)
+            clone["geometry"] = mapping(out_geom)
+            buffered.append(clone)
+        except Exception:
+            continue
+    return buffered
 
 
 def _mvt_geometry_to_geojson(

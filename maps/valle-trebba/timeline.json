@@ -1,0 +1,21 @@
+{
+  "size": 1,
+  "name": "Valle Trebba",
+  "url": "/valle-trebba",
+  "date": 2026,
+  "color": "blue-bell",
+  "mode": "geocontext",
+  "tags": ["demo", "geocontext", "remote"],
+  "repository": "openhistorymap/valle_trebba",
+  "ref": "HEAD",
+  "base": {
+    "zoom": 15,
+    "lat": 44.702654,
+    "lng": 12.121156
+  },
+  "description": "Pulls a geocontext.json manifest from a public GitHub repo via jsDelivr, resolves its datasources, and exposes the features for symbolic rendering.",
+  "copyright": "See upstream repo for attribution.",
+  "sources": [],
+  "relateds": [],
+  "relatedLayers": []
+}

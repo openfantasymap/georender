@@ -46,7 +46,7 @@ All core logic lives under `georender_service/`:
 1. Request arrives → `app.py` resolves bounds (tile coords, center/zoom from timeline, or explicit bbox).
 2. `SourceStore.fetch_for_bounds()` picks the right adapter and fetches GeoJSON features clipped to those bounds.
 3. `GeoRenderer.render_tile_image()` / `render_png()` loads the ruleset, iterates rules sorted by `z_index`, and calls `_apply_rule()` for each matching feature.
-4. Symbolizers: `icon`, `polygon_fill`, `polygon_pattern`, `line_pattern` — all rendered via Pillow onto an RGBA canvas.
+4. Symbolizers: `icon`, `polygon_fill`, `polygon_pattern`, `polygon_texture`, `line_pattern` — all rendered via Pillow onto an RGBA canvas. `polygon_texture` is the photorealistic-tile variant: variant/rotation/jitter resolved once per feature, multiply `tint`, and global-grid alignment so neighbouring polygons stay seamless.
 5. PNG bytes are written to `FileCache` and returned with ETag/Cache-Control.
 
 ### Map sources (`maps/`)
@@ -55,6 +55,7 @@ Maps are discovered from `maps/*.json` or `maps/*/timeline.json`. The `mode` fie
 - `geojson` — reads a local file; path resolved relative to the timeline file.
 - `postgis` — queries a PostGIS DB via `connections.json`; tables come from `events` and `relatedLayers` fields.
 - `mvt` — fetches tiles from a `tile_url_template`; decodes with `mapbox-vector-tile`.
+- `geocontext` — fetches a `geocontext.json` manifest from a public GitHub repo (`<owner>/<repo>` via `cdn.jsdelivr.net/gh/`); resolves `datasources[]` (inline / remote GeoJSON, CSV-of-points, derived `transform` pipelines like `buffer`); features are tagged with `__layer` and `__source_layer` for ruleset filtering. Downloaded assets are cached under `cache/sources/geocontext/<owner>/<repo>/<sha>/`.
 
 The map `slug` is derived from the `url` field, or the file/directory name as fallback.
 
@@ -68,6 +69,8 @@ Each ruleset is a JSON file with:
 Filter operators: equality, `in`, `not_in`, `exists`, `gte`, `lte`.
 
 Legacy keys are normalized on load: `paint→symbolizer`, `z→z_index`, `where→filter`.
+
+A ruleset file can also be a `{"$remote": "github://owner/repo@ref/path.json"}` stub. `RulesetStore` follows the pointer (via jsDelivr for `github://`, direct fetch otherwise), caches the payload on disk under `cache/sources/rulesets/<sha>.json`, and folds its content hash into `revision()` so tile caches invalidate when the upstream changes. Accepted schemes: `https://`, `http://`, `github://`.
 
 ### Assets (`assets/`)
 

@@ -23,12 +23,37 @@ from .rules import RulesetStore, feature_matches
 
 
 class AssetStore:
-    def __init__(self, base_dir: str | Path):
+    REMOTE_PREFIXES = ("http://", "https://", "github://")
+
+    def __init__(self, base_dir: str | Path, cache_dir: str | Path | None = None):
         self.base_dir = Path(base_dir)
+        self.cache_dir = Path(cache_dir) if cache_dir else None
         self.registry_path = self.base_dir / "assets.json"
         self.registry = self._load_registry()
+        # Overlay registry of collections added at runtime (e.g. from a georender.json
+        # bundle). Looked up before the on-disk registry, so a bundle can shadow or
+        # extend the project's default collections for one render run.
+        self._overlay_collections: dict[str, dict[str, Any]] = {}
         self._file_cache: dict[tuple[str, int], Image.Image] = {}
         self._materialized_cache: dict[tuple[str, int, int, float, bool, bool, float, float], Image.Image] = {}
+
+    def register_overlay(self, collections: dict[str, Any]) -> None:
+        """Merge ad-hoc collection definitions into the runtime overlay registry.
+
+        Used by `georender.json` bundle loading: a remote bundle's `assets` block
+        lands here so its collections take precedence over `assets/assets.json`
+        for the lifetime of the AssetStore.
+        """
+        for name, defn in (collections or {}).items():
+            self._overlay_collections[str(name)] = defn
+
+    def clear_overlay(self) -> None:
+        self._overlay_collections.clear()
+
+    def _all_collections(self) -> dict[str, Any]:
+        merged = dict(self.registry.get("collections", {}))
+        merged.update(self._overlay_collections)
+        return merged
 
     def _load_registry(self) -> dict[str, Any]:
         if not self.registry_path.exists():
@@ -58,7 +83,11 @@ class AssetStore:
         if not name:
             raise ValueError("Asset name is required")
 
-        collections = self.registry.get("collections", {})
+        # Direct URI references skip the collection lookup entirely.
+        if name.startswith(self.REMOTE_PREFIXES):
+            return f"url:{name}", {"file": name}
+
+        collections = self._all_collections()
         aliases = self._normalize_asset_collections(asset_collections)
 
         path = self.base_dir / name
@@ -169,7 +198,7 @@ class AssetStore:
         key = (name, int(size_px or 0))
         if key in self._file_cache:
             return self._file_cache[key].copy()
-        path = self.base_dir / name
+        path = self._resolve_file_path(name)
         if not path.exists():
             raise FileNotFoundError(f"Asset file not found: {name}")
         img = Image.open(path).convert("RGBA")
@@ -181,11 +210,54 @@ class AssetStore:
         self._file_cache[key] = img.copy()
         return img
 
+    def _resolve_file_path(self, name: str) -> Path:
+        """Resolve an asset `file` reference to a local readable Path.
+
+        Accepts:
+          - bare names / relative paths → `base_dir / name` (existing behaviour).
+          - `http://` and `https://` URLs → download to `cache_dir/assets/...`.
+          - `github://<owner>/<repo>[@<ref>]/<path>` → expand to jsDelivr, then download.
+        """
+        if name.startswith("github://"):
+            from .uris import expand_github_uri
+            url = expand_github_uri(name)
+            return self._fetch_remote_asset(url, source_ref=name)
+        if name.startswith("http://") or name.startswith("https://"):
+            return self._fetch_remote_asset(name, source_ref=name)
+        return self.base_dir / name
+
+    def _fetch_remote_asset(self, url: str, *, source_ref: str) -> Path:
+        if not self.cache_dir:
+            raise FileNotFoundError(
+                f"Remote asset requested ({source_ref}) but AssetStore has no cache_dir; "
+                "configure one in GeoRenderer to enable remote asset downloads."
+            )
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
+        suffix = Path(url.split("?", 1)[0]).suffix or ".bin"
+        cache_path = self.cache_dir / "assets" / f"{digest}{suffix}"
+        if cache_path.exists():
+            return cache_path
+        import httpx
+
+        try:
+            response = httpx.get(url, timeout=30.0, follow_redirects=True)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise FileNotFoundError(f"Failed to fetch remote asset {source_ref}: {exc}") from exc
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(response.content)
+        return cache_path
+
 
 class GeoRenderer:
-    def __init__(self, rules_dir: str | Path, assets_dir: str | Path):
-        self.rules = RulesetStore(rules_dir)
-        self.assets = AssetStore(assets_dir)
+    def __init__(
+        self,
+        rules_dir: str | Path,
+        assets_dir: str | Path,
+        cache_dir: str | Path | None = None,
+    ):
+        self.rules = RulesetStore(rules_dir, cache_dir=cache_dir)
+        self.assets = AssetStore(assets_dir, cache_dir=cache_dir)
 
     def render_png(
         self,
@@ -265,6 +337,8 @@ class GeoRenderer:
                 self._render_polygon_fill(image, pixel_geom, symbolizer, rule.get("edge_fade"))
             elif stype == "polygon_pattern":
                 self._render_polygon_pattern(image, pixel_geom, symbolizer, rule.get("edge_fade"), asset_collections, rule_name, feature_idx)
+            elif stype == "polygon_texture":
+                self._render_polygon_texture(image, pixel_geom, symbolizer, rule.get("edge_fade"), asset_collections, rule_name, feature_idx)
             elif stype == "line_pattern":
                 self._render_line_pattern(image, pixel_geom, symbolizer, rule.get("edge_fade"), asset_collections, rule_name, feature_idx)
 
@@ -367,6 +441,90 @@ class GeoRenderer:
         layer.putalpha(ImageChopsMultiply(layer.getchannel("A"), mask))
         image.alpha_composite(layer)
 
+    def _render_polygon_texture(
+        self,
+        image: Image.Image,
+        geom: BaseGeometry,
+        symbolizer: dict[str, Any],
+        edge_fade: dict[str, Any] | None,
+        asset_collections: list[str] | dict[str, str] | None,
+        rule_name: str,
+        feature_idx: int,
+    ) -> None:
+        """Tile a photorealistic texture across a polygon.
+
+        Unlike `polygon_pattern`, the variant + rotation + brightness/contrast jitter
+        from the asset definition are resolved ONCE per feature (using a feature-stable
+        seed) and the resulting tile is repeated across the polygon bbox aligned to a
+        global pixel grid. That keeps adjacent stamps visually continuous instead of
+        producing a per-tile mosaic.
+
+        Symbolizer fields:
+          - asset (required): tileable texture asset reference.
+          - tile_size_px (default 128): nominal tile edge.
+          - rotation: feature-level rotation. Same shape as asset `randomization.rotation`
+            (0|90|180|270|true|[angles...]). Default 0.
+          - tint: optional CSS/hex color (with alpha) multiplied over the texture.
+            `#7a8c4a80` muddies toward a 50% green; `#ffffff00` is a no-op.
+          - opacity (default 1.0).
+        """
+        if geom.is_empty:
+            return
+        if not symbolizer.get("asset"):
+            return
+
+        feature_seed = f"texture|{rule_name}|{feature_idx}"
+        tile_size_px = int(symbolizer.get("tile_size_px", symbolizer.get("size_px", 128)))
+        opacity = float(symbolizer.get("opacity", 1.0))
+        rotation_spec = symbolizer.get("rotation", 0)
+        tint = symbolizer.get("tint")
+
+        seed_value = _stable_hash(feature_seed)
+        rotation_deg = _resolve_texture_rotation(rotation_spec, seed_value)
+
+        tile = self.assets.load_for_ruleset(
+            symbolizer["asset"],
+            asset_collections=asset_collections,
+            size_px=tile_size_px,
+            seed=feature_seed,
+        )
+        if rotation_deg:
+            tile = tile.rotate(-rotation_deg, expand=True, resample=Image.BICUBIC)
+
+        tw, th = tile.size
+        if tw <= 0 or th <= 0:
+            return
+
+        poly_bounds = geom.bounds
+        if not poly_bounds or len(poly_bounds) != 4:
+            return
+        minx, miny, maxx, maxy = poly_bounds
+
+        layer_minx = max(0, int(minx) - tw)
+        layer_miny = max(0, int(miny) - th)
+        layer_maxx = min(image.size[0], int(maxx) + tw)
+        layer_maxy = min(image.size[1], int(maxy) + th)
+        if layer_maxx <= layer_minx or layer_maxy <= layer_miny:
+            return
+
+        layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        # Align to a global grid so neighbouring polygons that share the same texture
+        # + rotation tile through each other without re-phasing at the polygon edge.
+        start_x = (layer_minx // tw) * tw
+        start_y = (layer_miny // th) * th
+        for y in range(start_y, layer_maxy + 1, th):
+            for x in range(start_x, layer_maxx + 1, tw):
+                layer.alpha_composite(tile, dest=(x, y))
+
+        if tint:
+            layer = _apply_tint(layer, _parse_color(tint))
+        if opacity < 1.0:
+            layer = _apply_opacity(layer, opacity)
+
+        mask = self._mask_for_geometry(image.size, geom, edge_fade)
+        layer.putalpha(ImageChopsMultiply(layer.getchannel("A"), mask))
+        image.alpha_composite(layer)
+
     def _render_line_pattern(
         self,
         image: Image.Image,
@@ -459,6 +617,41 @@ def _parse_color(value: str | tuple[int, int, int] | tuple[int, int, int, int]) 
         return value
     rgba = ImageColor.getcolor(value, "RGBA")
     return rgba
+
+
+from .uris import expand_github_uri as _expand_github_uri  # re-exported for tests
+
+
+def _apply_tint(layer: Image.Image, tint_rgba: tuple[int, int, int, int]) -> Image.Image:
+    """Multiply the layer's RGB by `tint_rgba`, weighted by the tint's alpha.
+
+    Alpha 255 = full multiply (image fully tinted). Alpha 0 = passthrough.
+    The layer's own alpha channel is preserved unchanged.
+    """
+    r, g, b, a = tint_rgba
+    strength = a / 255.0
+    if strength <= 0.0:
+        return layer
+    base_rgb = layer.convert("RGB")
+    tint_solid = Image.new("RGB", layer.size, (r, g, b))
+    multiplied = ImageChops.multiply(base_rgb, tint_solid)
+    blended = Image.blend(base_rgb, multiplied, strength)
+    return Image.merge("RGBA", (*blended.split(), layer.getchannel("A")))
+
+
+def _resolve_texture_rotation(rotation_spec: Any, seed_value: int) -> float:
+    """Same shape as asset randomization.rotation, but returns one stable angle."""
+    if rotation_spec is None or rotation_spec is False:
+        return 0.0
+    if rotation_spec is True:
+        opts = [0.0, 90.0, 180.0, 270.0]
+        return opts[seed_value % len(opts)]
+    if isinstance(rotation_spec, list):
+        opts = [float(v) for v in rotation_spec]
+        return opts[seed_value % len(opts)] if opts else 0.0
+    if isinstance(rotation_spec, (int, float)):
+        return float(rotation_spec)
+    return 0.0
 
 
 def _apply_opacity(img: Image.Image, opacity: float) -> Image.Image:

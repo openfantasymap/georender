@@ -32,8 +32,8 @@ CONNECTIONS_PATH = BASE_DIR / "connections.json"
 RENDERER_REVISION = "0.2.0-ofm"
 
 app = FastAPI(title="OFM Symbolic Renderer", version=RENDERER_REVISION)
-renderer = GeoRenderer(RULESETS_DIR, ASSETS_DIR)
-sources = SourceStore(MAPS_DIR, CONNECTIONS_PATH)
+renderer = GeoRenderer(RULESETS_DIR, ASSETS_DIR, cache_dir=CACHE_DIR / "sources")
+sources = SourceStore(MAPS_DIR, CONNECTIONS_PATH, cache_dir=CACHE_DIR / "sources")
 cache = FileCache(CACHE_DIR)
 
 

@@ -67,6 +67,22 @@ Map sources are discovered from `maps/*.json` and `maps/*/timeline.json`. The `m
 }
 ```
 
+**Geocontext** — pulls a [`geocontext.json`](https://github.com/openhistorymap/geocontext-front/blob/main/FORMAT.md) manifest from a public GitHub repo (via `cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/`), resolves its `datasources[]` (inline GeoJSON, remote GeoJSON, CSV-of-points, or client-side `transform` derivations like `buffer`), and tags features with `__layer` / `__source_layer` so rulesets can filter on them:
+```json
+{
+  "name": "Valle Trebba", "url": "/valle-trebba", "mode": "geocontext",
+  "repository": "openhistorymap/valle-trebba",
+  "ref": "HEAD",
+  "layers": ["graves"],
+  "base": { "zoom": 15, "lat": 44.702654, "lng": 12.121156 }
+}
+```
+- `repository` is shorthand for `"owner": "...", "repo": "..."` — either form works.
+- `ref` defaults to `HEAD` (the repo's default branch). Pin to a tag or commit SHA for reproducibility.
+- `manifest` lets you override the filename. Defaults to `geocontext.json`, with `gcx.json` as a fallback.
+- `layers` (optional) whitelists which data-driven layers to include; omit to pull them all.
+- Downloaded manifest + GeoJSON / CSV assets are cached on disk under `cache/sources/geocontext/<owner>/<repo>/<sha>/` so repeated tiles for the same revision don't re-hit jsDelivr.
+
 ### `connections.json`
 
 Required for PostGIS sources. Copy the example and fill in your DSN:
@@ -110,13 +126,77 @@ Rulesets live in `rulesets/<name>.json`. Rules are applied in ascending `z_index
 }
 ```
 
-**Symbolizers**: `icon`, `polygon_fill`, `polygon_pattern`, `line_pattern`.
+**Symbolizers**: `icon`, `polygon_fill`, `polygon_pattern`, `polygon_texture`, `line_pattern`.
+
+### Remote rulesets (`$remote`)
+
+A ruleset can live alongside its data in a public GitHub repo. To use it, drop a one-line stub in `rulesets/`:
+
+```jsonc
+// rulesets/valle-trebba.json
+{ "$remote": "github://openhistorymap/valle_trebba@HEAD/ruleset.json" }
+```
+
+On `load()`, the renderer fetches the upstream JSON via jsDelivr, caches it under `cache/sources/rulesets/<sha>.json`, and treats it as the real ruleset (normalization + validation included). The tile cache's `ruleset_revision` folds in the remote payload's hash, so publishing a new commit to the upstream `ruleset.json` invalidates downstream tiles once the local CDN cache is busted. Network failures on `revision()` are tolerated — tiles still serve from the existing cache.
+
+Accepted schemes: `https://`, `http://`, and `github://<owner>/<repo>[@<ref>]/<path>` (default `<ref>` = `HEAD`).
+
+### `polygon_texture`
+
+Photorealistic tile fill for polygons. Variant + rotation + brightness/contrast jitter from the asset definition are resolved **once per feature** (stable seed) and the resulting tile is repeated across the polygon's bbox aligned to a global pixel grid — so the inside of a polygon reads as one continuous texture, and neighbouring polygons that share a rule tile through each other without re-phasing at the seam.
+
+```json
+{
+  "name": "dossi",
+  "z_index": 4,
+  "geometry": ["Polygon", "MultiPolygon"],
+  "filter": {"__layer": "Dossi"},
+  "symbolizer": {
+    "type": "polygon_texture",
+    "asset": "ground.dirt_seamless",
+    "tile_size_px": 256,
+    "rotation": [0, 90, 180, 270],
+    "tint": "#806b4d80",
+    "opacity": 1.0
+  },
+  "edge_fade": {"distance_px": 6}
+}
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `asset` | required | Tileable texture asset (variant_set OK). |
+| `tile_size_px` | `128` | Nominal tile edge in output pixels. |
+| `rotation` | `0` | Single angle, `true` (random 0/90/180/270), or `[angles]`. Applied once per feature. |
+| `tint` | none | CSS/hex color, alpha-weighted multiply blend (`#7a8c4a80` = 50% green). |
+| `opacity` | `1.0` | Final layer opacity. |
 
 **Filter operators**: equality, `in`, `not_in`, `exists`, `gte`, `lte`.
 
 ## Assets
 
 Assets are defined in `assets/assets.json` grouped into collections. A ruleset references them via `asset_collections`. Variant selection and randomization (rotation, flip, brightness/contrast jitter) are deterministic per position, so tiles stay visually stable across requests.
+
+A `file` entry can be:
+
+| Form | Loaded from |
+|---|---|
+| `tree.png` (bare / relative) | `assets/tree.png` on disk. |
+| `https://…` / `http://…` | Downloaded once, cached under `cache/sources/assets/<sha>.<ext>`. |
+| `github://<owner>/<repo>[@<ref>]/<path>` | Expanded to `cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/<path>` and cached. `<ref>` defaults to `HEAD`. |
+
+This lets a geocontext-style map ship its own textures, sketches, or aerial-photo overlays from the same GitHub repo that holds the manifest — and the ruleset references them through the normal collection mechanism:
+
+```json
+"collections": {
+  "valle_trebba": {
+    "aerofoto_1976": {
+      "file": "github://openhistorymap/valle_trebba@HEAD/backgrounds/rer_1976_78.jpg",
+      "kind": "sprite"
+    }
+  }
+}
+```
 
 ```json
 {
@@ -146,6 +226,12 @@ uvicorn georender_service.app:app --reload
 ## Cache
 
 Rendered tiles and images are cached on disk under `cache/`. The cache key includes the map slug, source revision, ruleset revision, and renderer version — so edits to a ruleset or timeline file automatically invalidate affected entries. To bust everything, bump `RENDERER_REVISION` in `georender_service/app.py`.
+
+### Purging jsDelivr in geocontext repos
+
+The `geocontext` source mode fetches the manifest, datasets, ruleset, and assets from `cdn.jsdelivr.net`, which edge-caches every file for 12 hours. When you push a change to a geocontext repo, downstream renderers keep seeing the stale copy until that TTL elapses.
+
+`scripts/workflows/purge-jsdelivr.yml` is a drop-in GitHub Action that automates the purge. Copy it into any geocontext repo as `.github/workflows/purge-jsdelivr.yml` — no edits needed; it reads `${{ github.repository }}` and `${{ github.ref_name }}` from the workflow context. On every push to `main`/`master` it walks `git ls-files`, batches the paths through jsDelivr's bulk endpoint (100 paths per request), and purges both `@HEAD` and `@<branch>` aliases.
 
 ## License
 
