@@ -474,3 +474,33 @@ def test_asset_store_clear_overlay_restores_disk_only(tmp_assets):
     store.clear_overlay()
     with pytest.raises(FileNotFoundError):
         store.resolve("shadow.x", {"shadow": "shadow"})
+
+
+def test_resolve_falls_back_to_literal_prefix_when_alias_misses(tmp_assets):
+    """Ruleset alias `vt → valle_trebba` but a literal `vt` overlay collection
+    holds the asset — resolver should use the overlay rather than 404."""
+    store = AssetStore(tmp_assets)
+    store.register_overlay({"vt": {"acqua": {"file": "tile.png"}}})
+    resolved_id, asset_def = store.resolve(
+        "vt.acqua",
+        asset_collections={"vt": "valle_trebba"},  # alias points elsewhere
+    )
+    assert resolved_id == "vt.acqua"
+    assert asset_def == {"file": "tile.png"}
+
+
+def test_alias_target_still_wins_when_it_has_the_asset(tmp_assets):
+    """If the aliased collection DOES have the asset, the alias wins — the
+    literal-prefix fallback only kicks in on a miss."""
+    store = AssetStore(tmp_assets)
+    store.register_overlay(
+        {
+            "vt": {"x": {"file": "tile.png"}},
+            "valle_trebba": {"x": {"file": "icon.png"}},
+        }
+    )
+    resolved_id, asset_def = store.resolve(
+        "vt.x", asset_collections={"vt": "valle_trebba"}
+    )
+    assert resolved_id == "valle_trebba.x"
+    assert asset_def == {"file": "icon.png"}

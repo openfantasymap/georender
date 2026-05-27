@@ -100,6 +100,16 @@ class AssetStore:
             collection = collections.get(collection_name)
             if collection and asset_name in collection:
                 return f"{collection_name}.{asset_name}", collection[asset_name]
+            # Fallback: the ruleset aliased the prefix to a collection that
+            # doesn't carry the asset, but a collection literally named `prefix`
+            # does. This happens when a georender.json bundle declares a
+            # collection under the same short name the ruleset uses as an alias
+            # — e.g. ruleset says "vt": "valle_trebba" while the bundle ships
+            # a collection called "vt" directly. Honour the literal prefix.
+            if collection_name != prefix:
+                direct = collections.get(prefix)
+                if direct and asset_name in direct:
+                    return f"{prefix}.{asset_name}", direct[asset_name]
 
         found: list[tuple[str, dict[str, Any]]] = []
         search_order = list(dict.fromkeys(list(aliases.values()) + list(collections.keys())))
