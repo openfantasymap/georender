@@ -215,6 +215,64 @@ This lets a geocontext-style map ship its own textures, sketches, or aerial-phot
 }
 ```
 
+## Static rendering
+
+Besides the HTTP API, `scripts/static_render.py` produces a single PNG to a file. Three invocation forms:
+
+```bash
+# 1. Registered map from maps/*/timeline.json
+python scripts/static_render.py valle-trebba valle-trebba out.png --bbox 12.103,44.695,12.127,44.718
+
+# 2. Same, but with the explicit --map flag (the positional <ruleset> <output> form)
+python scripts/static_render.py --map valle-trebba valle-trebba out.png --bbox 12.103,44.695,12.127,44.718
+
+# 3. Ad-hoc geocontext repo — no maps/ entry required
+python scripts/static_render.py \
+    --mode geocontext --repository <owner>/<repo> \
+    [--ref HEAD] [--manifest geocontext.json] [--layers Layer1,Layer2] \
+    [<ruleset>] out.png
+```
+
+When a geocontext repo ships a `georender.json` bundle, the trailing `<ruleset>` positional becomes optional — the bundle's declared ruleset, asset collections, default bbox/base, and canvas size are used as defaults. CLI flags (`--bbox`, `--bbox-crs`, `--width`, `--height`, `--padding`) override the bundle when present.
+
+### From the published Docker image
+
+`scripts/static_render.py` ships inside the image, so the same commands run without a local Python install. Mount a host directory for the output PNG:
+
+```bash
+# Render a public geocontext repo using whatever its georender.json declares.
+# Nothing local required beyond an output directory.
+docker run --rm \
+  -v "$(pwd)":/out \
+  ghcr.io/openfantasymap/georender:main \
+  python scripts/static_render.py \
+    --mode geocontext --repository openhistorymap/valle_trebba \
+    /out/valle-trebba.png
+
+# Override canvas + bbox from the CLI (overrides win against the bundle).
+docker run --rm \
+  -v "$(pwd)":/out \
+  ghcr.io/openfantasymap/georender:main \
+  python scripts/static_render.py \
+    --mode geocontext --repository openhistorymap/valle_trebba \
+    --bbox 12.103,44.695,12.127,44.718 --width 2048 --height 2048 \
+    /out/valle-trebba.png
+
+# Render a registered map using your own maps/ and rulesets/ from the host.
+docker run --rm \
+  -v "$(pwd)/maps":/app/maps \
+  -v "$(pwd)/rulesets":/app/rulesets \
+  -v "$(pwd)":/out \
+  ghcr.io/openfantasymap/georender:main \
+  python scripts/static_render.py mymap mystyle /out/render.png \
+    --bbox 9,43,12,46 --width 2048 --height 2048
+```
+
+Tips:
+- Mount `-v "$(pwd)/cache":/app/cache` if you want the downloaded geocontext datasets, rulesets, and remote assets to persist across container runs — otherwise every invocation re-fetches them from jsDelivr.
+- For PostGIS-backed maps, mount `connections.json` at `/app/connections.json` and make sure the container can reach your database host.
+- `--mode geocontext` only needs network access to GitHub + jsDelivr; no `connections.json` or local map registry is required.
+
 ## Local development
 
 ```bash

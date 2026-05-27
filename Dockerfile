@@ -9,6 +9,7 @@ COPY georender_service/ ./georender_service/
 COPY assets/ ./assets/
 COPY rulesets/ ./rulesets/
 COPY maps/ ./maps/
+COPY scripts/ ./scripts/
 
 RUN mkdir -p cache
 
