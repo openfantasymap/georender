@@ -896,3 +896,46 @@ def test_loose_json_still_raises_on_truly_bad_json():
 
     with pytest.raises(json.JSONDecodeError):
         _loose_json_loads("{not even close")
+
+
+# ---------------------------------------------------------------------------
+# georender.schema.json — sanity checks on the shipped schema
+# ---------------------------------------------------------------------------
+
+
+def _load_schema():
+    schema_path = Path(__file__).resolve().parent.parent / "schemas" / "georender.schema.json"
+    return json.loads(schema_path.read_text(encoding="utf-8"))
+
+
+def test_schema_file_is_valid_json_and_self_describes():
+    schema = _load_schema()
+    assert schema["$schema"].startswith("https://json-schema.org/")
+    assert schema["title"] == "georender.json"
+    assert schema["type"] == "object"
+    # Every top-level field the runtime knows about must appear in the schema.
+    expected = {"version", "ruleset", "assets", "base", "bbox", "render", "geocontext"}
+    assert expected.issubset(set(schema["properties"].keys()))
+
+
+def test_schema_example_roundtrips_through_runtime_parser():
+    from georender_service.sources import _loose_json_loads
+
+    schema = _load_schema()
+    examples = schema.get("examples", [])
+    assert examples, "schema must ship at least one example bundle"
+    for example in examples:
+        text = json.dumps(example)
+        # The loose parser is what fetch_render_config feeds the bundle into.
+        # Sanity-check that a schema example survives that path unchanged.
+        assert _loose_json_loads(text) == example
+
+
+def test_schema_example_drives_through_rewrite():
+    from georender_service.sources import _rewrite_files_to_github
+
+    schema = _load_schema()
+    example = schema["examples"][0]
+    rewritten = _rewrite_files_to_github(example["assets"], "owner", "repo", "main")
+    aerofoto = rewritten["vt"]["aerofoto_1976"]["file"]
+    assert aerofoto == "github://owner/repo@main/backgrounds/rer_1976_78.jpg"

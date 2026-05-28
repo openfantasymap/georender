@@ -128,6 +128,32 @@ Rulesets live in `rulesets/<name>.json`. Rules are applied in ascending `z_index
 
 **Symbolizers**: `icon`, `polygon_fill`, `polygon_pattern`, `polygon_texture`, `line_pattern`.
 
+### `georender.json` bundle
+
+A geocontext repo can ship a `georender.json` at its root that declares the ruleset, asset collections, default extent (`bbox` or `base`), and canvas (`render.width/height/padding_px`) — see the full schema at [`schemas/georender.schema.json`](schemas/georender.schema.json). Add the `$schema` pointer to get autocomplete + validation in VSCode and most JSON editors:
+
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/openfantasymap/georender/main/schemas/georender.schema.json",
+  "version": 1,
+  "ruleset": "georender_ruleset.json",
+  "bbox": [12.089, 44.695, 12.127, 44.722],
+  "render": { "width": 4096, "height": 4096, "padding_px": 64 },
+  "assets": {
+    "vt": {
+      "acqua_increspata": {
+        "file": "assets/blue-rippled-water-background.jpg",
+        "kind": "texture",
+        "tileable": true
+      }
+    }
+  },
+  "geocontext": { "manifest": "gcx.json" }
+}
+```
+
+The runtime parser tolerates `//` and `/* */` comments and trailing commas, so the file can carry inline documentation.
+
 ### Remote rulesets (`$remote`)
 
 A ruleset can live alongside its data in a public GitHub repo. To use it, drop a one-line stub in `rulesets/`:

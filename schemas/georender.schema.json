@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/openfantasymap/georender/main/schemas/georender.schema.json",
+  "title": "georender.json",
+  "description": "Render bundle for a geocontext repository: declares a default ruleset, asset collections, render extent, and canvas defaults. The renderer (https://github.com/openfantasymap/georender) reads this file from `cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/georender.json` when invoked in `--mode geocontext`. The runtime parser tolerates // and /* */ comments and trailing commas, so this schema does not constrain whitespace or comments — only the resulting structure.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "version": {
+      "description": "Schema version. Currently `1` (number) or `\"1.0\"` (string).",
+      "oneOf": [
+        { "type": "integer", "const": 1 },
+        { "type": "string" }
+      ]
+    },
+    "type": {
+      "description": "Reserved discriminator for tooling; conventionally \"GeoRender\".",
+      "type": "string"
+    },
+    "name": {
+      "description": "Human-readable label for the bundle.",
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "ruleset": {
+      "description": "Either a path (relative to the repo root) to a ruleset JSON file, or an inline ruleset object. Path strings are fetched via jsDelivr; inline objects are registered directly with the runtime RulesetStore.",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Path inside the geocontext repo, e.g. `\"ruleset.json\"` or `\"styles/sketchy.json\"`."
+        },
+        {
+          "$ref": "#/$defs/inlineRuleset"
+        }
+      ]
+    },
+    "assets": {
+      "description": "Asset collections registered with the renderer for this bundle. Each collection name maps to a dict of asset definitions whose `file` paths may be bare-relative (auto-rewritten to `github://<owner>/<repo>@<ref>/...`), `github://` URIs, or absolute `http(s)://` URLs.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/assetCollection"
+      }
+    },
+    "base": {
+      "description": "Default render center + zoom (used as a fallback extent when neither `bbox` nor `--bbox` is supplied).",
+      "type": "object",
+      "required": ["lat", "lng", "zoom"],
+      "properties": {
+        "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+        "lng": { "type": "number", "minimum": -180, "maximum": 180 },
+        "zoom": { "type": "number", "minimum": 0, "maximum": 24 }
+      },
+      "additionalProperties": false
+    },
+    "bbox": {
+      "description": "Default render extent as [west, south, east, north] in EPSG:4326 decimal degrees. Takes precedence over `base` when both are present.",
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "render": {
+      "description": "Default canvas dimensions. CLI flags (--width / --height / --padding) override individual fields when present.",
+      "type": "object",
+      "properties": {
+        "width": { "type": "integer", "minimum": 64, "maximum": 16384 },
+        "height": { "type": "integer", "minimum": 64, "maximum": 16384 },
+        "padding_px": { "type": "integer", "minimum": 0, "maximum": 2048 }
+      },
+      "additionalProperties": false
+    },
+    "geocontext": {
+      "description": "Overrides for the data side of the geocontext source. All fields are optional; the renderer defaults pick the right values when omitted.",
+      "type": "object",
+      "properties": {
+        "manifest": {
+          "description": "Manifest filename inside the repo. Defaults to `geocontext.json` then `gcx.json`.",
+          "type": "string"
+        },
+        "layers": {
+          "description": "Layer name whitelist — only features belonging to data-driven layers in this list are returned. Omit to include every data-driven layer.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "assetFileRef": {
+      "description": "A path or URI to an asset file. Forms: a bare-relative path (`backgrounds/x.jpg`, auto-anchored to the geocontext repo), `github://<owner>/<repo>[@<ref>]/<path>`, or an absolute `http(s)://` URL.",
+      "type": "string",
+      "minLength": 1
+    },
+    "randomization": {
+      "description": "Per-stamp deterministic randomization applied during asset materialization. Seed is derived from rule + feature index + position, so adjacent renders stay visually stable.",
+      "type": "object",
+      "properties": {
+        "rotation": {
+          "oneOf": [
+            { "type": "boolean", "description": "true → random 0/90/180/270" },
+            {
+              "type": "array",
+              "items": { "type": "number" },
+              "description": "Pick uniformly from the listed degrees."
+            }
+          ]
+        },
+        "flip_x": { "type": "boolean" },
+        "flip_y": { "type": "boolean" },
+        "brightness_jitter": {
+          "type": "number",
+          "description": "±factor (0.0–1.0) applied to brightness.",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "contrast_jitter": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "assetEntry": {
+      "description": "A single asset definition. Either a plain file (`{file: ..., kind?: ...}`) or a `variant_set` with weighted variants.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["file"],
+          "properties": {
+            "file": { "$ref": "#/$defs/assetFileRef" },
+            "kind": {
+              "type": "string",
+              "enum": ["sprite", "raster", "texture", "icon"],
+              "description": "Free-form tag describing the asset's intended use. The renderer doesn't gate on this; tooling can."
+            },
+            "randomization": { "$ref": "#/$defs/randomization" },
+            "description": { "type": "string" },
+            "attribution": { "type": "string" },
+            "bounds": {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 4,
+              "maxItems": 4,
+              "description": "For raster overlays: [W,S,E,N] in EPSG:4326 (metadata only — not consumed by the symbolizer yet)."
+            },
+            "crs": { "type": "string" },
+            "tileable": { "type": "boolean" }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": ["kind", "variants"],
+          "properties": {
+            "kind": { "const": "variant_set" },
+            "variants": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "$ref": "#/$defs/assetFileRef" },
+                  "weight": { "type": "number", "minimum": 0 },
+                  "randomization": { "$ref": "#/$defs/randomization" }
+                },
+                "additionalProperties": true
+              }
+            },
+            "randomization": { "$ref": "#/$defs/randomization" },
+            "description": { "type": "string" }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "assetCollection": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/assetEntry" }
+    },
+    "inlineRuleset": {
+      "description": "Full inline ruleset object. The renderer's validation runs at load time — see https://github.com/openfantasymap/georender/blob/main/README.md#rulesets for the rule schema. Only the high-level shape is constrained here.",
+      "type": "object",
+      "required": ["rules"],
+      "properties": {
+        "name": { "type": "string" },
+        "background": { "type": "string" },
+        "asset_collections": {
+          "oneOf": [
+            { "type": "array", "items": { "type": "string" } },
+            {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          ]
+        },
+        "rules": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "examples": [
+    {
+      "version": 1,
+      "ruleset": "georender_ruleset.json",
+      "geocontext": { "manifest": "gcx.json" },
+      "base": { "lat": 44.702654, "lng": 12.121156, "zoom": 15 },
+      "bbox": [12.089725, 44.695627, 12.127533, 44.722283],
+      "render": { "width": 4096, "height": 4096, "padding_px": 64 },
+      "assets": {
+        "vt": {
+          "aerofoto_1976": {
+            "file": "backgrounds/rer_1976_78.jpg",
+            "kind": "raster",
+            "bounds": [12.103627, 44.695303, 12.126806, 44.718105],
+            "crs": "EPSG:4326",
+            "attribution": "© Regione Emilia-Romagna — volo 1976-78"
+          },
+          "acqua_increspata": {
+            "file": "assets/blue-rippled-water-background.jpg",
+            "kind": "texture",
+            "tileable": true
+          }
+        }
+      }
+    }
+  ]
+}
