@@ -46,7 +46,7 @@ All core logic lives under `georender_service/`:
 1. Request arrives → `app.py` resolves bounds (tile coords, center/zoom from timeline, or explicit bbox).
 2. `SourceStore.fetch_for_bounds()` picks the right adapter and fetches GeoJSON features clipped to those bounds.
 3. `GeoRenderer.render_tile_image()` / `render_png()` loads the ruleset, iterates rules sorted by `z_index`, and calls `_apply_rule()` for each matching feature.
-4. Symbolizers: `icon`, `polygon_fill`, `polygon_pattern`, `polygon_texture`, `line_pattern` — all rendered via Pillow onto an RGBA canvas. `polygon_texture` is the photorealistic-tile variant: variant/rotation/jitter resolved once per feature, multiply `tint`, and global-grid alignment so neighbouring polygons stay seamless.
+4. Symbolizers: `icon`, `polygon_fill`, `polygon_pattern`, `polygon_texture`, `line_pattern`, `wms` — all rendered via Pillow onto an RGBA canvas. `polygon_texture` is the photorealistic-tile variant: variant/rotation/jitter resolved once per feature, multiply `tint`, and global-grid alignment so neighbouring polygons stay seamless. `wms` is the viewport-wide raster: live WMS GetMap fetched against the viewport bounds, disk-cached under `cache/sources/wms/`, composited at the rule's z_index; geometry/filter are not required.
 5. PNG bytes are written to `FileCache` and returned with ETag/Cache-Control.
 
 ### Map sources (`maps/`)

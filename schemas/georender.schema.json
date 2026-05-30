@@ -204,6 +204,49 @@
         }
       },
       "additionalProperties": true
+    },
+    "wmsSymbolizer": {
+      "description": "Viewport-wide WMS GetMap layer. Documented here so editors that drill into a ruleset's `rules[].symbolizer` can complete WMS fields. The renderer composites the fetched image at this rule's z_index, so put the WMS rule low in the stack to use it as a background or higher to overlay it.",
+      "type": "object",
+      "required": ["type", "url", "layers"],
+      "properties": {
+        "type": { "const": "wms" },
+        "url": {
+          "description": "Base WMS endpoint, e.g. `https://servizigis.regione.emilia-romagna.it/wms/Aerofoto_RER`",
+          "type": "string",
+          "format": "uri"
+        },
+        "layers": {
+          "description": "Comma-separated WMS layer name(s).",
+          "type": "string"
+        },
+        "version": {
+          "description": "WMS protocol version. Default 1.3.0.",
+          "type": "string",
+          "enum": ["1.1.1", "1.3.0"]
+        },
+        "format": {
+          "description": "Response MIME type. Default image/png. Use image/jpeg for opaque aerial photos to halve bandwidth.",
+          "type": "string"
+        },
+        "crs": {
+          "description": "Requested SRS/CRS. Default EPSG:3857 (the renderer's native). Use EPSG:4326 only if the server requires it — the runtime handles the WMS 1.3.0 lat/lon axis flip automatically.",
+          "type": "string"
+        },
+        "styles": { "type": "string" },
+        "transparent": { "type": "boolean" },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "extra_params": {
+          "description": "Free-form query-string params merged into the GetMap URL.",
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean"] }
+        },
+        "cache": {
+          "description": "Whether to disk-cache the WMS response. Default true; set false for layers whose upstream content changes (weather, real-time imagery).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
     }
   },
   "examples": [

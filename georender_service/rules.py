@@ -25,7 +25,12 @@ SUPPORTED_SYMBOLIZERS = {
     "polygon_pattern",
     "polygon_texture",
     "line_pattern",
+    "wms",
 }
+
+# Symbolizers that paint the whole viewport once, independent of any feature.
+# Rules using these don't need a `geometry` whitelist or `filter`.
+VIEWPORT_SYMBOLIZERS = {"wms"}
 
 
 class RulesetStore:
@@ -175,9 +180,17 @@ class RulesetStore:
                 raise RulesetError(
                     f"Rule #{idx} has unsupported symbolizer type: {symbolizer_type}"
                 )
-            geoms = rule.get("geometry", [])
-            if not geoms or not all(g in SUPPORTED_GEOMS for g in geoms):
-                raise RulesetError(f"Rule #{idx} has invalid geometry types: {geoms}")
+            # Viewport-wide symbolizers (e.g. `wms`) don't filter on features,
+            # so the geometry whitelist is optional. Per-feature symbolizers
+            # still require it.
+            if symbolizer_type not in VIEWPORT_SYMBOLIZERS:
+                geoms = rule.get("geometry", [])
+                if not geoms or not all(g in SUPPORTED_GEOMS for g in geoms):
+                    raise RulesetError(f"Rule #{idx} has invalid geometry types: {geoms}")
+            else:
+                geoms = rule.get("geometry") or []
+                if geoms and not all(g in SUPPORTED_GEOMS for g in geoms):
+                    raise RulesetError(f"Rule #{idx} has invalid geometry types: {geoms}")
             edge_fade = rule.get("edge_fade")
             if edge_fade is not None:
                 distance = edge_fade.get("distance_px", 0)

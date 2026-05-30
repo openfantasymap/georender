@@ -334,6 +334,11 @@ class GeoRenderer:
         symbolizer = rule["symbolizer"]
         stype = symbolizer["type"]
         rule_name = rule.get("name") or rule.get("id") or stype
+        # Viewport-wide symbolizers don't iterate over features: they paint the
+        # whole canvas once based on the viewport's bounds.
+        if stype == "wms":
+            self._render_wms(image, viewport, symbolizer, rule.get("edge_fade"), rule_name)
+            return
         for feature_idx, (feature, world_geom) in enumerate(indexed):
             if world_geom.is_empty:
                 continue
@@ -535,6 +540,104 @@ class GeoRenderer:
         layer.putalpha(ImageChopsMultiply(layer.getchannel("A"), mask))
         image.alpha_composite(layer)
 
+    def _render_wms(
+        self,
+        image: Image.Image,
+        viewport: Viewport,
+        symbolizer: dict[str, Any],
+        edge_fade: dict[str, Any] | None,
+        rule_name: str,
+    ) -> None:
+        """Composite a WMS GetMap response onto the canvas.
+
+        Fields on the symbolizer:
+          - url (required): base WMS endpoint.
+          - layers (required): comma-separated layer names.
+          - version: WMS protocol version, default "1.3.0" ("1.1.1" also OK).
+          - format: image MIME, default "image/png" ("image/jpeg" for opaque
+            aerial photos is usually smaller + faster).
+          - crs: requested SRS/CRS, default "EPSG:3857" (the renderer's native
+            projection — avoids reprojection cost AND the 1.3.0 geographic-CRS
+            axis-order footgun).
+          - styles: default "" (server default).
+          - transparent: default true (false for opaque photos).
+          - opacity: default 1.0, applied to the final RGBA layer.
+          - extra_params: free-form dict of additional query-string params
+            (e.g. ArcGIS-specific overrides).
+          - cache: default true. Set false for layers whose upstream content
+            changes (the 1976 aerofoto is fine to cache forever; weather isn't).
+        """
+        url = symbolizer.get("url")
+        layers = symbolizer.get("layers")
+        if not url or not layers:
+            return  # silently skip — keeps a partially-configured ruleset renderable
+
+        version = str(symbolizer.get("version", "1.3.0"))
+        crs = str(symbolizer.get("crs", "EPSG:3857")).upper()
+        bbox_str = _wms_bbox_for_viewport(viewport, crs, version)
+        request_url = _wms_get_map_url(
+            url,
+            version=version,
+            layers=str(layers),
+            styles=str(symbolizer.get("styles", "")),
+            crs=crs,
+            bbox=bbox_str,
+            width=viewport.width,
+            height=viewport.height,
+            fmt=str(symbolizer.get("format", "image/png")),
+            transparent=bool(symbolizer.get("transparent", True)),
+            extra=symbolizer.get("extra_params") or {},
+        )
+
+        png_bytes = self._fetch_wms(request_url, use_cache=bool(symbolizer.get("cache", True)))
+        if png_bytes is None:
+            return
+
+        try:
+            layer_img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+        except Exception:
+            # Servers sometimes return an HTML error masquerading as image/png.
+            # Don't crash the whole render — drop this layer.
+            return
+
+        if layer_img.size != (viewport.width, viewport.height):
+            layer_img = layer_img.resize((viewport.width, viewport.height), Image.LANCZOS)
+
+        opacity = float(symbolizer.get("opacity", 1.0))
+        if opacity < 1.0:
+            layer_img = _apply_opacity(layer_img, opacity)
+
+        if edge_fade and edge_fade.get("distance_px", 0) > 0:
+            radius = float(edge_fade["distance_px"])
+            mask = Image.new("L", layer_img.size, 255)
+            mask = mask.filter(ImageFilter.GaussianBlur(radius=radius / 2))
+            existing_alpha = layer_img.getchannel("A")
+            layer_img.putalpha(ImageChopsMultiply(existing_alpha, mask))
+
+        image.alpha_composite(layer_img)
+
+    def _fetch_wms(self, url: str, *, use_cache: bool) -> bytes | None:
+        """Fetch a WMS response, optionally backed by the on-disk asset cache."""
+        cache_path: Path | None = None
+        if use_cache and self.assets.cache_dir is not None:
+            digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
+            cache_path = self.assets.cache_dir / "wms" / f"{digest}.bin"
+            if cache_path.exists():
+                return cache_path.read_bytes()
+
+        import httpx
+
+        try:
+            response = httpx.get(url, timeout=60.0, follow_redirects=True)
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return None
+        data = response.content
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_bytes(data)
+        return data
+
     def _render_line_pattern(
         self,
         image: Image.Image,
@@ -630,6 +733,69 @@ def _parse_color(value: str | tuple[int, int, int] | tuple[int, int, int, int]) 
 
 
 from .uris import expand_github_uri as _expand_github_uri  # re-exported for tests
+
+
+def _wms_bbox_for_viewport(viewport: Viewport, crs: str, version: str) -> str:
+    """Build the BBOX query string for a WMS GetMap matching the viewport.
+
+    The viewport is always EPSG:3857. If the WMS server speaks a different CRS
+    we reproject the corners. WMS 1.3.0 also flipped the axis order for
+    geographic CRSes (EPSG:4326 / CRS:84 → lat,lon instead of lon,lat) — handle
+    that here so the symbolizer config doesn't have to.
+    """
+    minx, miny, maxx, maxy = viewport.minx, viewport.miny, viewport.maxx, viewport.maxy
+    crs_upper = crs.upper()
+    if crs_upper not in ("EPSG:3857", "EPSG:900913"):
+        try:
+            from pyproj import Transformer
+
+            transformer = Transformer.from_crs("EPSG:3857", crs_upper, always_xy=True)
+            minx, miny = transformer.transform(viewport.minx, viewport.miny)
+            maxx, maxy = transformer.transform(viewport.maxx, viewport.maxy)
+        except Exception:
+            # Fall back to passing the raw mercator numbers — the server will
+            # reject the request loudly, which is the right failure mode.
+            pass
+    if version == "1.3.0" and crs_upper in ("EPSG:4326", "CRS:84"):
+        return f"{miny},{minx},{maxy},{maxx}"
+    return f"{minx},{miny},{maxx},{maxy}"
+
+
+def _wms_get_map_url(
+    base: str,
+    *,
+    version: str,
+    layers: str,
+    styles: str,
+    crs: str,
+    bbox: str,
+    width: int,
+    height: int,
+    fmt: str,
+    transparent: bool,
+    extra: dict[str, Any],
+) -> str:
+    from urllib.parse import urlencode
+
+    params: dict[str, str] = {
+        "SERVICE": "WMS",
+        "VERSION": version,
+        "REQUEST": "GetMap",
+        "LAYERS": layers,
+        "STYLES": styles,
+        # WMS 1.1.1 calls it SRS; 1.3.0 calls it CRS. Send both — extra ones
+        # are harmless and some servers are picky.
+        ("CRS" if version == "1.3.0" else "SRS"): crs,
+        "BBOX": bbox,
+        "WIDTH": str(width),
+        "HEIGHT": str(height),
+        "FORMAT": fmt,
+        "TRANSPARENT": "TRUE" if transparent else "FALSE",
+    }
+    for k, v in extra.items():
+        params[str(k).upper()] = str(v)
+    separator = "&" if "?" in base else "?"
+    return f"{base}{separator}{urlencode(params)}"
 
 
 def _apply_tint(layer: Image.Image, tint_rgba: tuple[int, int, int, int]) -> Image.Image:

@@ -126,7 +126,42 @@ Rulesets live in `rulesets/<name>.json`. Rules are applied in ascending `z_index
 }
 ```
 
-**Symbolizers**: `icon`, `polygon_fill`, `polygon_pattern`, `polygon_texture`, `line_pattern`.
+**Symbolizers**: `icon`, `polygon_fill`, `polygon_pattern`, `polygon_texture`, `line_pattern`, `wms`.
+
+### `wms` (viewport raster)
+
+Live WMS GetMap layer, composited across the whole viewport. Unlike the other symbolizers it doesn't iterate over features — `geometry` and `filter` are optional. Place it low in `z_index` to use as a basemap, or higher to overlay on top of data layers.
+
+```jsonc
+{
+  "name": "aerofoto-1976",
+  "z_index": 0,
+  "symbolizer": {
+    "type": "wms",
+    "url": "https://servizigis.regione.emilia-romagna.it/wms/Aerofoto_RER",
+    "layers": "RER_1976_78",
+    "version": "1.3.0",
+    "format": "image/jpeg",
+    "transparent": false,
+    "opacity": 1.0
+  }
+}
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `url` | required | Base WMS endpoint. |
+| `layers` | required | Comma-separated layer name(s). |
+| `version` | `"1.3.0"` | Also accepts `"1.1.1"`. |
+| `format` | `"image/png"` | Use `"image/jpeg"` for opaque photo layers. |
+| `crs` | `"EPSG:3857"` | Renderer's native — no reprojection, no axis-order surprises. Pass `"EPSG:4326"` if the server requires it; the 1.3.0 lat/lon flip is handled automatically. |
+| `styles` | `""` | Server default. |
+| `transparent` | `true` | Set false for opaque rasters (smaller payloads). |
+| `opacity` | `1.0` | Final layer opacity. |
+| `extra_params` | `{}` | Free-form GET params merged into the request. |
+| `cache` | `true` | Disk-cache responses under `cache/sources/wms/`. Set false for upstreams whose content changes (weather, real-time). |
+
+Network failures and non-image responses (HTML error pages from misconfigured WMS) degrade gracefully — the renderer drops the layer and the rest of the scene still produces a PNG. `edge_fade.distance_px` softens the raster's outer border into transparency.
 
 ### `georender.json` bundle
 

@@ -527,3 +527,48 @@ def test_clear_inline_removes_entries(tmp_path):
     store.clear_inline()
     with pytest.raises(RulesetError, match="not found"):
         store.load("x")
+
+
+def test_wms_rule_validates_without_geometry(tmp_path):
+    """WMS rules paint the viewport once; geometry is not required."""
+    store = RulesetStore(tmp_path)
+    _write_ruleset(
+        tmp_path / "w.json",
+        {
+            "rules": [
+                {
+                    "name": "aerial",
+                    "z_index": 0,
+                    "symbolizer": {
+                        "type": "wms",
+                        "url": "https://example.com/wms",
+                        "layers": "RER_1976",
+                    },
+                }
+            ]
+        },
+    )
+    data = store.load("w")
+    assert data["rules"][0]["symbolizer"]["type"] == "wms"
+
+
+def test_wms_rule_with_invalid_geometry_still_rejected(tmp_path):
+    """If a WMS rule does declare a geometry list, bad entries still fail."""
+    store = RulesetStore(tmp_path)
+    _write_ruleset(
+        tmp_path / "w.json",
+        {
+            "rules": [
+                {
+                    "geometry": ["Banana"],
+                    "symbolizer": {
+                        "type": "wms",
+                        "url": "https://example.com/wms",
+                        "layers": "X",
+                    },
+                }
+            ]
+        },
+    )
+    with pytest.raises(RulesetError, match="geometry"):
+        store.load("w")

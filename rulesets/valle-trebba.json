@@ -7,6 +7,19 @@
   },
   "rules": [
     {
+      "name": "aerofoto-1976-wms",
+      "z_index": 0,
+      "symbolizer": {
+        "type": "wms",
+        "url": "https://servizigis.regione.emilia-romagna.it/wms/Aerofoto_RER",
+        "layers": "RER_1976_78",
+        "version": "1.3.0",
+        "format": "image/jpeg",
+        "transparent": false,
+        "opacity": 0.85
+      }
+    },
+    {
       "name": "linea-di-costa",
       "z_index": 1,
       "geometry": ["Polygon", "MultiPolygon"],

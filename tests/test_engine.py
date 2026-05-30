@@ -504,3 +504,226 @@ def test_alias_target_still_wins_when_it_has_the_asset(tmp_assets):
     )
     assert resolved_id == "valle_trebba.x"
     assert asset_def == {"file": "icon.png"}
+
+
+# ---------------------------------------------------------------------------
+# WMS symbolizer
+# ---------------------------------------------------------------------------
+
+
+def _wms_ruleset(extra=None):
+    sym = {
+        "type": "wms",
+        "url": "https://example.com/wms",
+        "layers": "Aerial_1976",
+        "version": "1.3.0",
+        "format": "image/jpeg",
+        "transparent": False,
+    }
+    if extra:
+        sym.update(extra)
+    return {
+        "name": "wms",
+        "background": "#00000000",
+        "rules": [{"name": "aerial", "z_index": 0, "symbolizer": sym}],
+    }
+
+
+def _png_bytes(color=(20, 220, 80, 255), w=8, h=8):
+    import io as _io
+    buf = _io.BytesIO()
+    Image.new("RGBA", (w, h), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_wms_get_map_url_carries_required_params():
+    from georender_service.engine import _wms_get_map_url
+
+    url = _wms_get_map_url(
+        "https://example.com/wms",
+        version="1.3.0",
+        layers="A,B",
+        styles="",
+        crs="EPSG:3857",
+        bbox="0,0,1,1",
+        width=512,
+        height=512,
+        fmt="image/png",
+        transparent=True,
+        extra={"FOO": "bar"},
+    )
+    assert "SERVICE=WMS" in url
+    assert "VERSION=1.3.0" in url
+    assert "REQUEST=GetMap" in url
+    assert "LAYERS=A%2CB" in url  # comma encoded
+    assert "CRS=EPSG%3A3857" in url
+    assert "BBOX=0%2C0%2C1%2C1" in url
+    assert "WIDTH=512" in url
+    assert "TRANSPARENT=TRUE" in url
+    assert "FOO=bar" in url
+
+
+def test_wms_get_map_url_uses_srs_for_111():
+    from georender_service.engine import _wms_get_map_url
+
+    url = _wms_get_map_url(
+        "https://example.com/wms",
+        version="1.1.1",
+        layers="X",
+        styles="",
+        crs="EPSG:3857",
+        bbox="0,0,1,1",
+        width=1,
+        height=1,
+        fmt="image/png",
+        transparent=False,
+        extra={},
+    )
+    assert "SRS=EPSG%3A3857" in url
+    assert "CRS=" not in url
+
+
+def test_wms_bbox_keeps_xy_order_for_mercator():
+    from georender_service.engine import _wms_bbox_for_viewport
+    from georender_service.geometry import Viewport
+
+    vp = Viewport(minx=0.0, miny=0.0, maxx=10.0, maxy=20.0, width=100, height=100)
+    assert _wms_bbox_for_viewport(vp, "EPSG:3857", "1.3.0") == "0.0,0.0,10.0,20.0"
+
+
+def test_wms_bbox_swaps_axes_for_4326_in_130():
+    """WMS 1.3.0 flipped the axis order for EPSG:4326 to lat,lon."""
+    from georender_service.engine import _wms_bbox_for_viewport
+    from georender_service.geometry import Viewport
+
+    # Viewport that maps approximately to (lon, lat) = (11..12, 44..45)
+    vp = Viewport(
+        minx=1224000.0, miny=5466000.0,
+        maxx=1335000.0, maxy=5621000.0,
+        width=512, height=512,
+    )
+    bbox_130 = _wms_bbox_for_viewport(vp, "EPSG:4326", "1.3.0").split(",")
+    bbox_111 = _wms_bbox_for_viewport(vp, "EPSG:4326", "1.1.1").split(",")
+    # 1.3.0 puts lat (smaller magnitude) before lon for this AOI; 1.1.1 stays lon,lat.
+    assert bbox_130 != bbox_111
+    # Loose sanity: 1.3.0 first coord should be a lat in ~44–45 range
+    assert 40 < float(bbox_130[0]) < 50
+    # And 1.1.1 first coord should be a lon in ~10–12
+    assert 10 < float(bbox_111[0]) < 13
+
+
+def test_wms_renders_pixels_from_mocked_server(tmp_ruleset_dir, tmp_assets, tmp_path, monkeypatch):
+    """End-to-end: WMS rule fetches via mocked httpx, composites onto canvas."""
+    payload = _png_bytes((30, 80, 200, 255), w=64, h=64)
+    received: list[str] = []
+
+    class _Resp:
+        status_code = 200
+        content = payload
+
+        def raise_for_status(self):
+            return None
+
+    import httpx as _httpx
+
+    def fake_get(url, *args, **kwargs):
+        received.append(url)
+        return _Resp()
+
+    monkeypatch.setattr(_httpx, "get", fake_get)
+
+    (tmp_ruleset_dir / "wms.json").write_text(json.dumps(_wms_ruleset()), encoding="utf-8")
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets, cache_dir=tmp_path / "cache")
+    empty = {"type": "FeatureCollection", "features": []}
+    data = renderer.render_png(empty, "wms", width=32, height=32)
+    img = Image.open(__import__("io").BytesIO(data))
+    # The composited WMS layer should bring in the blue payload — at least one pixel
+    # non-background.
+    alphas = [px[3] for px in img.getdata()]
+    assert any(a > 0 for a in alphas)
+
+    # Request URL must include the canonical WMS params and a real-looking BBOX.
+    assert len(received) == 1
+    assert "SERVICE=WMS" in received[0]
+    assert "LAYERS=Aerial_1976" in received[0]
+
+
+def test_wms_caches_response(tmp_ruleset_dir, tmp_assets, tmp_path, monkeypatch):
+    payload = _png_bytes()
+
+    class _Resp:
+        status_code = 200
+        content = payload
+
+        def raise_for_status(self):
+            return None
+
+    calls: list[str] = []
+    import httpx as _httpx
+
+    def counting_get(url, *a, **kw):
+        calls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr(_httpx, "get", counting_get)
+
+    (tmp_ruleset_dir / "wms.json").write_text(json.dumps(_wms_ruleset()), encoding="utf-8")
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets, cache_dir=tmp_path / "cache")
+    empty = {"type": "FeatureCollection", "features": []}
+    renderer.render_png(empty, "wms", width=32, height=32)
+    renderer.render_png(empty, "wms", width=32, height=32)
+    # Both renders use the same viewport → same URL → second comes from disk.
+    assert len(calls) == 1
+
+
+def test_wms_cache_false_bypasses_disk(tmp_ruleset_dir, tmp_assets, tmp_path, monkeypatch):
+    payload = _png_bytes()
+
+    class _Resp:
+        status_code = 200
+        content = payload
+
+        def raise_for_status(self):
+            return None
+
+    calls: list[str] = []
+    import httpx as _httpx
+
+    monkeypatch.setattr(_httpx, "get", lambda url, *a, **kw: (calls.append(url), _Resp())[1])
+
+    rs = _wms_ruleset({"cache": False})
+    (tmp_ruleset_dir / "wms.json").write_text(json.dumps(rs), encoding="utf-8")
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets, cache_dir=tmp_path / "cache")
+    empty = {"type": "FeatureCollection", "features": []}
+    renderer.render_png(empty, "wms", width=32, height=32)
+    renderer.render_png(empty, "wms", width=32, height=32)
+    assert len(calls) == 2  # no cache, both renders hit the network
+
+
+def test_wms_network_failure_keeps_render_alive(tmp_ruleset_dir, tmp_assets, tmp_path, monkeypatch):
+    import httpx as _httpx
+
+    def raising_get(*a, **kw):
+        raise _httpx.ConnectError("offline")
+
+    monkeypatch.setattr(_httpx, "get", raising_get)
+
+    (tmp_ruleset_dir / "wms.json").write_text(json.dumps(_wms_ruleset()), encoding="utf-8")
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets, cache_dir=tmp_path / "cache")
+    empty = {"type": "FeatureCollection", "features": []}
+    # Should NOT crash — degrades to a transparent canvas instead.
+    data = renderer.render_png(empty, "wms", width=32, height=32)
+    assert data[:8] == PNG_SIGNATURE
+
+
+def test_wms_missing_url_is_silent_noop(tmp_ruleset_dir, tmp_assets):
+    rs = {
+        "name": "wms",
+        "rules": [{"name": "x", "z_index": 0, "symbolizer": {"type": "wms"}}],
+    }
+    (tmp_ruleset_dir / "wms.json").write_text(json.dumps(rs), encoding="utf-8")
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets)
+    data = renderer.render_png(
+        {"type": "FeatureCollection", "features": []}, "wms", width=16, height=16
+    )
+    assert data[:8] == PNG_SIGNATURE
