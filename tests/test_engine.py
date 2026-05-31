@@ -790,3 +790,57 @@ def test_wms_non_image_content_type_warns_and_does_not_cache(
     assert "non-image content-type" in err
     cache_dir = tmp_path / "cache" / "wms"
     assert not cache_dir.exists() or not any(cache_dir.iterdir())
+
+
+def test_wms_accepts_octet_stream_with_real_image_bytes(tmp_ruleset_dir, tmp_assets, tmp_path, monkeypatch):
+    """Some WMS endpoints serve real image bytes under application/octet-stream.
+    We trust the bytes and let Image.open decide; the content-type guard should
+    only veto known-error MIME types (text/*, ServiceException XML, JSON)."""
+    payload = _png_bytes((50, 90, 150, 255), w=64, h=64)
+
+    class _Resp:
+        status_code = 200
+        content = payload
+        headers = {"content-type": "application/octet-stream"}
+
+        def raise_for_status(self):
+            return None
+
+    import httpx as _httpx
+
+    monkeypatch.setattr(_httpx, "get", lambda url, *a, **kw: _Resp())
+
+    (tmp_ruleset_dir / "wms.json").write_text(json.dumps(_wms_ruleset()), encoding="utf-8")
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets, cache_dir=tmp_path / "cache")
+    data = renderer.render_png(
+        {"type": "FeatureCollection", "features": []}, "wms", width=32, height=32
+    )
+    img = Image.open(__import__("io").BytesIO(data))
+    # Real image bytes must end up on the canvas.
+    alphas = [px[3] for px in img.getdata()]
+    assert any(a > 0 for a in alphas)
+    # And the response should have been cached for future renders.
+    cache_dir = tmp_path / "cache" / "wms"
+    assert cache_dir.exists() and any(cache_dir.iterdir())
+
+
+def test_wms_still_rejects_serviceexception_xml(tmp_ruleset_dir, tmp_assets, tmp_path, monkeypatch, capsys):
+    """The OGC ServiceException MIME type must still be vetoed."""
+    class _Resp:
+        status_code = 200
+        content = b"<?xml version=\"1.0\"?><ServiceExceptionReport/>"
+        headers = {"content-type": "application/vnd.ogc.se_xml; charset=utf-8"}
+
+        def raise_for_status(self):
+            return None
+
+    import httpx as _httpx
+
+    monkeypatch.setattr(_httpx, "get", lambda url, *a, **kw: _Resp())
+
+    (tmp_ruleset_dir / "wms.json").write_text(json.dumps(_wms_ruleset()), encoding="utf-8")
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets, cache_dir=tmp_path / "cache")
+    renderer.render_png(
+        {"type": "FeatureCollection", "features": []}, "wms", width=16, height=16
+    )
+    assert "non-image content-type" in capsys.readouterr().err

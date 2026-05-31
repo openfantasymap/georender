@@ -660,10 +660,14 @@ class GeoRenderer:
         data = response.content
         # Don't cache HTML/XML/JSON error documents that the server may have
         # returned with a 200 status (some WMS servers ship ServiceException
-        # XML with 200 OK). Decoding will fail upstream and warn, but at least
-        # the bogus payload doesn't poison the cache for future renders.
-        content_type = (response.headers.get("content-type") or "").lower()
-        if content_type and not content_type.startswith("image/"):
+        # XML with 200 OK). We only reject content-types that we KNOW are
+        # error documents — `application/octet-stream` and friends are passed
+        # through because some misconfigured WMS endpoints serve real image
+        # bytes under a generic binary content-type; Image.open below will
+        # reject anything that isn't actually an image.
+        content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+        error_prefixes = ("text/", "application/xml", "application/json", "application/vnd.ogc.")
+        if content_type and any(content_type.startswith(p) for p in error_prefixes):
             preview = data[:200].decode("utf-8", errors="replace").strip()
             sys.stderr.write(
                 f"WARN [wms rule '{rule_name}']: server returned non-image content-type "
