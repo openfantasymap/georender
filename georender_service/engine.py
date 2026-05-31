@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -589,15 +590,25 @@ class GeoRenderer:
             extra=symbolizer.get("extra_params") or {},
         )
 
-        png_bytes = self._fetch_wms(request_url, use_cache=bool(symbolizer.get("cache", True)))
+        png_bytes = self._fetch_wms(
+            request_url,
+            use_cache=bool(symbolizer.get("cache", True)),
+            rule_name=rule_name,
+        )
         if png_bytes is None:
             return
 
         try:
             layer_img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-        except Exception:
-            # Servers sometimes return an HTML error masquerading as image/png.
-            # Don't crash the whole render — drop this layer.
+        except Exception as exc:
+            # Servers sometimes return an HTML/XML error masquerading as
+            # image/png. Don't crash the whole render — drop this layer but
+            # tell the operator so they can fix the URL.
+            preview = png_bytes[:120].decode("utf-8", errors="replace").strip()
+            sys.stderr.write(
+                f"WARN [wms rule '{rule_name}']: response is not a decodable image ({exc}); "
+                f"first bytes: {preview!r}\n"
+            )
             return
 
         if layer_img.size != (viewport.width, viewport.height):
@@ -616,8 +627,13 @@ class GeoRenderer:
 
         image.alpha_composite(layer_img)
 
-    def _fetch_wms(self, url: str, *, use_cache: bool) -> bytes | None:
-        """Fetch a WMS response, optionally backed by the on-disk asset cache."""
+    def _fetch_wms(self, url: str, *, use_cache: bool, rule_name: str) -> bytes | None:
+        """Fetch a WMS response, optionally backed by the on-disk asset cache.
+
+        Diagnostic logging is intentionally chatty: WMS errors are common
+        (typos in the endpoint, server-side ServiceException, auth) and a
+        silent drop hides them at render time.
+        """
         cache_path: Path | None = None
         if use_cache and self.assets.cache_dir is not None:
             digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
@@ -629,10 +645,31 @@ class GeoRenderer:
 
         try:
             response = httpx.get(url, timeout=60.0, follow_redirects=True)
-            response.raise_for_status()
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            sys.stderr.write(
+                f"WARN [wms rule '{rule_name}']: network error fetching {url!r}: {exc}\n"
+            )
+            return None
+        if response.status_code >= 400:
+            preview = response.content[:200].decode("utf-8", errors="replace").strip()
+            sys.stderr.write(
+                f"WARN [wms rule '{rule_name}']: HTTP {response.status_code} from {url!r}; "
+                f"body: {preview!r}\n"
+            )
             return None
         data = response.content
+        # Don't cache HTML/XML/JSON error documents that the server may have
+        # returned with a 200 status (some WMS servers ship ServiceException
+        # XML with 200 OK). Decoding will fail upstream and warn, but at least
+        # the bogus payload doesn't poison the cache for future renders.
+        content_type = (response.headers.get("content-type") or "").lower()
+        if content_type and not content_type.startswith("image/"):
+            preview = data[:200].decode("utf-8", errors="replace").strip()
+            sys.stderr.write(
+                f"WARN [wms rule '{rule_name}']: server returned non-image content-type "
+                f"{content_type!r} for {url!r}; body: {preview!r}\n"
+            )
+            return None
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_bytes(data)

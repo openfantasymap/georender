@@ -11,12 +11,12 @@
       "z_index": 0,
       "symbolizer": {
         "type": "wms",
-        "url": "https://servizigis.regione.emilia-romagna.it/wms/Aerofoto_RER",
+        "url": "https://servizigis.regione.emilia-romagna.it/wms/RER_1976_78",
         "layers": "RER_1976_78",
         "version": "1.3.0",
         "format": "image/jpeg",
         "transparent": false,
-        "opacity": 0.85
+        "opacity": 1.0
       }
     },
     {

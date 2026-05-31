@@ -620,6 +620,7 @@ def test_wms_renders_pixels_from_mocked_server(tmp_ruleset_dir, tmp_assets, tmp_
     class _Resp:
         status_code = 200
         content = payload
+        headers = {"content-type": "image/png"}
 
         def raise_for_status(self):
             return None
@@ -654,6 +655,7 @@ def test_wms_caches_response(tmp_ruleset_dir, tmp_assets, tmp_path, monkeypatch)
     class _Resp:
         status_code = 200
         content = payload
+        headers = {"content-type": "image/png"}
 
         def raise_for_status(self):
             return None
@@ -682,6 +684,7 @@ def test_wms_cache_false_bypasses_disk(tmp_ruleset_dir, tmp_assets, tmp_path, mo
     class _Resp:
         status_code = 200
         content = payload
+        headers = {"content-type": "image/png"}
 
         def raise_for_status(self):
             return None
@@ -727,3 +730,63 @@ def test_wms_missing_url_is_silent_noop(tmp_ruleset_dir, tmp_assets):
         {"type": "FeatureCollection", "features": []}, "wms", width=16, height=16
     )
     assert data[:8] == PNG_SIGNATURE
+
+
+def test_wms_http_error_warns_and_skips_layer(tmp_ruleset_dir, tmp_assets, tmp_path, monkeypatch, capsys):
+    """An HTTP 404 (or any 4xx/5xx) should drop the layer AND warn loudly so a
+    misconfigured URL is visible at render time."""
+    html_body = b"<!DOCTYPE html><html><body>404 not found</body></html>"
+
+    class _Resp:
+        status_code = 404
+        content = html_body
+        headers = {"content-type": "text/html"}
+
+        def raise_for_status(self):
+            return None  # we check status_code ourselves
+
+    import httpx as _httpx
+
+    monkeypatch.setattr(_httpx, "get", lambda url, *a, **kw: _Resp())
+
+    (tmp_ruleset_dir / "wms.json").write_text(json.dumps(_wms_ruleset()), encoding="utf-8")
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets, cache_dir=tmp_path / "cache")
+    empty = {"type": "FeatureCollection", "features": []}
+    renderer.render_png(empty, "wms", width=16, height=16)
+
+    err = capsys.readouterr().err
+    assert "HTTP 404" in err
+    assert "aerial" in err  # the rule name from _wms_ruleset
+    # And nothing was cached from the failed response.
+    cache_dir = tmp_path / "cache" / "wms"
+    assert not cache_dir.exists() or not any(cache_dir.iterdir())
+
+
+def test_wms_non_image_content_type_warns_and_does_not_cache(
+    tmp_ruleset_dir, tmp_assets, tmp_path, monkeypatch, capsys
+):
+    """Some WMS servers return 200 OK with ServiceException XML — guard against
+    that so a bogus payload doesn't poison the disk cache."""
+    xml_body = b"<?xml version=\"1.0\"?><ServiceExceptionReport>oops</ServiceExceptionReport>"
+
+    class _Resp:
+        status_code = 200
+        content = xml_body
+        headers = {"content-type": "application/vnd.ogc.se_xml; charset=utf-8"}
+
+        def raise_for_status(self):
+            return None
+
+    import httpx as _httpx
+
+    monkeypatch.setattr(_httpx, "get", lambda url, *a, **kw: _Resp())
+
+    (tmp_ruleset_dir / "wms.json").write_text(json.dumps(_wms_ruleset()), encoding="utf-8")
+    renderer = GeoRenderer(tmp_ruleset_dir, tmp_assets, cache_dir=tmp_path / "cache")
+    empty = {"type": "FeatureCollection", "features": []}
+    renderer.render_png(empty, "wms", width=16, height=16)
+
+    err = capsys.readouterr().err
+    assert "non-image content-type" in err
+    cache_dir = tmp_path / "cache" / "wms"
+    assert not cache_dir.exists() or not any(cache_dir.iterdir())
