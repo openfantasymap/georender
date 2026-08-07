@@ -1,0 +1,31 @@
+# Python bytecode / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Tests and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Render, download and generation cache. All content-addressed and rebuildable,
+# but note that cache/sources/openrouter/gen/ costs real money to regenerate —
+# back that directory up rather than relying on it being reproducible for free.
+cache/
+
+# Local secrets. The .example variants beside them stay tracked.
+connections.json
+openrouter.json
+
+# OS cruft
+.DS_Store
+Thumbs.db
