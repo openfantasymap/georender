@@ -26,11 +26,14 @@ SUPPORTED_SYMBOLIZERS = {
     "polygon_texture",
     "line_pattern",
     "wms",
+    "ai_image",
 }
 
 # Symbolizers that paint the whole viewport once, independent of any feature.
 # Rules using these don't need a `geometry` whitelist or `filter`.
-VIEWPORT_SYMBOLIZERS = {"wms"}
+# `ai_image` still *reads* geometry/filter when they're present — it uses them to
+# pick which features go into its control render — but neither is required.
+VIEWPORT_SYMBOLIZERS = {"wms", "ai_image"}
 
 
 class RulesetStore:

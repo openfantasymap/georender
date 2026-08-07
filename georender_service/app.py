@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, Response
 from shapely.geometry import box
 
 from .cache import FileCache
-from .engine import GeoRenderer
+from .engine import GeoRenderer, RenderContext
 from .geometry import (
     WEB_MERCATOR_BOUNDS,
     ensure_mercator,
@@ -29,12 +29,44 @@ ASSETS_DIR = BASE_DIR / "assets"
 MAPS_DIR = BASE_DIR / "maps"
 CACHE_DIR = BASE_DIR / "cache"
 CONNECTIONS_PATH = BASE_DIR / "connections.json"
-RENDERER_REVISION = "0.2.0-ofm"
+OPENROUTER_CONFIG_PATH = BASE_DIR / "openrouter.json"
+RENDERER_REVISION = "0.3.0-ofm"
 
 app = FastAPI(title="OFM Symbolic Renderer", version=RENDERER_REVISION)
-renderer = GeoRenderer(RULESETS_DIR, ASSETS_DIR, cache_dir=CACHE_DIR / "sources")
+renderer = GeoRenderer(
+    RULESETS_DIR,
+    ASSETS_DIR,
+    cache_dir=CACHE_DIR / "sources",
+    openrouter_config_path=OPENROUTER_CONFIG_PATH,
+)
 sources = SourceStore(MAPS_DIR, CONNECTIONS_PATH, cache_dir=CACHE_DIR / "sources")
 cache = FileCache(CACHE_DIR)
+
+
+def _render_context(
+    map_name: str,
+    fetched,
+    tile: tuple[int, int, int] | None = None,
+) -> RenderContext:
+    """Give the renderer what it needs to widen its own fetch.
+
+    `ai_image` snaps tile requests to a coarse anchor cell and generates once for
+    the whole cell, so it needs features well outside the requested tile. Handing
+    it a callback keeps SourceStore out of the engine.
+    """
+
+    def _fetch(bounds: tuple[float, float, float, float]) -> list[dict[str, Any]]:
+        try:
+            return sources.fetch_for_bounds(map_name, bounds).features
+        except SourceError:
+            return []
+
+    return RenderContext(
+        tile=tile,
+        source_revision=fetched.revision,
+        source_crs=fetched.source_crs,
+        fetch_features=_fetch,
+    )
 
 
 @app.get("/health")
@@ -144,7 +176,13 @@ def render_named_tile(
             height=tile_size + buffer_px * 2,
             padding_px=buffer_px,
         )
-        img = renderer.render_tile_image(features, mercator_geoms, ruleset, viewport)
+        img = renderer.render_tile_image(
+            features,
+            mercator_geoms,
+            ruleset,
+            viewport,
+            context=_render_context(map_name, fetched, tile=(z, x, y)),
+        )
         cropped = img.crop((buffer_px, buffer_px, buffer_px + tile_size, buffer_px + tile_size))
         png = _image_to_png_bytes(cropped)
         cache.write_bytes(cache_path, png)
@@ -202,6 +240,7 @@ def render_named_image(
             source_crs=fetched.source_crs,
             bbox=list(bounds),
             padding_px=padding_px,
+            context=_render_context(map_name, fetched),
         )
         cache.write_bytes(cache_path, png)
         return _png_response(png, etag=etag, cache_control="public, max-age=3600")

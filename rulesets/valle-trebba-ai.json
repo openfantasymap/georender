@@ -1,0 +1,81 @@
+{
+  "name": "valle-trebba-ai",
+  "background": "#2e2620",
+  "rules": [
+    {
+      "name": "ai-terrain",
+      "z_index": 0,
+      "geometry": ["Polygon", "MultiPolygon"],
+      "filter": { "__layer": { "not_in": ["Sfondo"] } },
+      "symbolizer": {
+        "type": "ai_image",
+        "model": "google/gemini-2.5-flash-image",
+        "prompt": "Render as a low-altitude black-and-white aerial survey photograph of the Po delta, in the style of the 1976-78 Emilia-Romagna flight: fine film grain, soft contrast, no colour cast. Cultivated fields, drainage ditches and field boundaries fill the neutral ground between the mapped units.",
+        "describe_scene": true,
+        "control": {
+          "group_by": "__layer",
+          "background": "#6f6a60",
+          "_comment": "Muted, terrain-plausible colours on purpose — see the README note on choosing control colours. Saturated colours read to the model as an annotation overlay it should preserve, and survive into the output as flat neon; colours already near the target material get repainted, and degrade gracefully when they aren't.",
+          "groups": {
+            "Dossi": {
+              "color": "#b9a479",
+              "describe": "a raised sandy dune ridge — pale dry soil, sparse scrub, slightly higher than the surrounding fields"
+            },
+            "Dossi (Valle Pega)": {
+              "color": "#b0a480",
+              "describe": "a low sandy rise under cultivation"
+            },
+            "Paleoalvei": {
+              "color": "#55614e",
+              "describe": "a silted-up former river channel — dark damp clay, sinuous, sharply darker than the fields around it"
+            },
+            "Cordoni": {
+              "color": "#d8cdb0",
+              "describe": "a beach ridge of pale dry sand running parallel to the old shoreline"
+            },
+            "Linea di costa": {
+              "color": "#8d9aa0",
+              "describe": "shallow brackish lagoon water, flat and featureless"
+            },
+            "Ustrina (aree)": {
+              "color": "#4b4643",
+              "describe": "a burnt cremation area — scorched dark ground, bare of vegetation"
+            },
+            "Palificazioni (legno)": {
+              "color": "#7a6a52",
+              "describe": "a waterlogged timber piling structure at the water's edge"
+            },
+            "Abitato": {
+              "color": "#9a8f7d",
+              "describe": "a low earthen settlement mound with beaten ground"
+            },
+            "Passerelle": {
+              "color": "#8a7f6a",
+              "describe": "a narrow raised timber walkway over wet ground"
+            }
+          }
+        },
+        "anchor_zoom_delta": 4,
+        "anchor_size_px": 1024,
+        "max_side_px": 1024,
+        "opacity": 1.0,
+        "cache": true
+      }
+    },
+    {
+      "name": "ustrina-aree",
+      "z_index": 5,
+      "geometry": ["Polygon", "MultiPolygon"],
+      "filter": { "__layer": "Ustrina (aree)" },
+      "symbolizer": { "type": "polygon_fill", "fill": "#3f3b3866" },
+      "edge_fade": { "distance_px": 4 }
+    },
+    {
+      "name": "palificazioni-legno",
+      "z_index": 6,
+      "geometry": ["Polygon", "MultiPolygon"],
+      "filter": { "__layer": "Palificazioni (legno)" },
+      "symbolizer": { "type": "polygon_fill", "fill": "#8c623980" }
+    }
+  ]
+}

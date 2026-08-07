@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy to openrouter.json. The API key is better supplied via $OPENROUTER_API_KEY — the environment always wins over this file. Everything else here is a project default that per-rule / per-asset config can override.",
+  "api_key": "sk-or-v1-...",
+  "api_key_env": "OPENROUTER_API_KEY",
+  "model": "google/gemini-2.5-flash-image",
+  "base_url": "https://openrouter.ai/api/v1",
+  "referer": "https://github.com/openfantasymap/georender",
+  "title": "georender",
+  "timeout": 180.0
+}

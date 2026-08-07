@@ -90,9 +90,168 @@
   },
   "$defs": {
     "assetFileRef": {
-      "description": "A path or URI to an asset file. Forms: a bare-relative path (`backgrounds/x.jpg`, auto-anchored to the geocontext repo), `github://<owner>/<repo>[@<ref>]/<path>`, or an absolute `http(s)://` URL.",
+      "description": "A path or URI to an asset file. Forms: a bare-relative path (`backgrounds/x.jpg`, auto-anchored to the geocontext repo), `github://<owner>/<repo>[@<ref>]/<path>`, an absolute `http(s)://` URL, or `openrouter://<model>` to synthesize the image from the sibling `prompt` field.",
       "type": "string",
       "minLength": 1
+    },
+    "generatedAsset": {
+      "description": "Fields that apply when `file` is an `openrouter://<model>` URI. The image is generated once per resolved prompt and cached under `cache/sources/openrouter/gen/`, so a shared prompt costs one call no matter how many features use it.",
+      "type": "object",
+      "properties": {
+        "prompt": {
+          "description": "Required for `openrouter://` files. `{property}` placeholders are interpolated from the properties of the feature being drawn — that's what makes generated artwork data-driven. Unknown placeholders collapse to an empty string.",
+          "type": "string",
+          "minLength": 1
+        },
+        "vary_by_seed": {
+          "description": "Generate a distinct image per stamp instead of sharing one per prompt. Multiplies cost by the number of stamps — sensible for a handful of icons, ruinous for a dense pattern.",
+          "type": "boolean"
+        },
+        "transparent": {
+          "description": "Ask for a cut-out subject on transparent alpha. Appended to the prompt as an instruction; models honour it imperfectly.",
+          "type": "boolean"
+        },
+        "cache": {
+          "description": "Disk-cache the generation. Default true. Turning it off means paying for every render.",
+          "type": "boolean"
+        },
+        "api_key_env": {
+          "description": "Name of the environment variable holding the API key, when it isn't $OPENROUTER_API_KEY.",
+          "type": "string"
+        },
+        "extra_body": {
+          "description": "Extra top-level fields merged into the OpenRouter request body.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "aiImageSymbolizer": {
+      "description": "Viewport-wide layer painted by an OpenRouter image model. The renderer always sends a control image built from the real features this rule matches (flat colour regions at their true positions) plus an instruction to preserve every boundary, so the output registers over the geometry rather than inventing a layout. Descriptive text — the colour legend and the scene facts — is opt-in.",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "ai_image" },
+        "model": {
+          "description": "OpenRouter model id. Must accept image input and produce image output. Defaults to the client's configured model (google/gemini-2.5-flash-image).",
+          "type": "string"
+        },
+        "prompt": {
+          "description": "Style and content direction, appended after the grounding preamble. Optional: with no prompt the model is simply asked to repaint the control image faithfully.",
+          "type": "string"
+        },
+        "control": {
+          "description": "How the real data is turned into the control image.",
+          "type": "object",
+          "properties": {
+            "source": {
+              "description": "`features` (default) sends the flat colour render; `canvas` sends the scene painted by lower-z_index rules; `both` sends canvas then flat render as two input images. `canvas`/`both` are unavailable under anchor-grid generation (the canvas covers one tile, the anchor covers many) and fall back to `features` with a warning.",
+              "type": "string",
+              "enum": ["features", "canvas", "both"]
+            },
+            "group_by": {
+              "description": "Feature property whose value defines a control group. Each distinct value gets its own flat colour. Omit to paint every matched feature in one colour.",
+              "type": "string"
+            },
+            "draw_order": {
+              "description": "Order features are painted into the control image. `area` (default) draws largest first, so a viewport-sized backdrop polygon cannot bury the units inside it — one rule paints every feature in a single pass and has no per-rule z_index to fall back on. Zero-area geometries (lines, points) therefore always land on top. `source` keeps the order as fetched.",
+              "type": "string",
+              "enum": ["area", "source"]
+            },
+            "groups": {
+              "description": "Explicit colour and description per group value. Declaring these is strongly preferred: undeclared groups still get a deterministic colour derived from the key, but only a description tells the model what the region IS. Prefer MUTED, terrain-plausible colours over saturated ones — saturated keys tend to survive into the output as flat overlay shapes, while colours near the target material get repainted and degrade gracefully when they aren't.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "color": {
+                    "description": "CSS/hex colour for this group in the control image. Use saturated, well-separated colours.",
+                    "type": "string"
+                  },
+                  "describe": {
+                    "description": "What to paint here, e.g. \"sandy dune ridge, dry scrub\". Supplying any description turns the prompt's colour legend on.",
+                    "type": "string"
+                  },
+                  "description": { "type": "string" }
+                },
+                "additionalProperties": true
+              }
+            },
+            "background": {
+              "description": "Fill for areas with no feature. Default #000000ff.",
+              "type": "string"
+            },
+            "include_legend": {
+              "description": "Force the colour legend into the prompt. Defaults to true when any group carries a description, false otherwise.",
+              "type": "boolean"
+            },
+            "line_width_px": {
+              "description": "Stroke width for line features in the control image. Default 6.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "point_radius_px": {
+              "description": "Dot radius for point features in the control image. Default 8.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "name_property": {
+              "description": "Property read for the `describe_scene` named-features list. Default `name`.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "describe_scene": {
+          "description": "Append measured facts — EPSG:4326 extent, ground resolution in m/pixel (cos-latitude corrected), north-up, per-group feature counts and names — all derived from the data being rendered. Default false.",
+          "type": "boolean"
+        },
+        "max_names": {
+          "description": "Cap on named features listed by `describe_scene`. Default 12.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "anchor": {
+          "description": "On tile requests, generate once per coarse grid cell and crop each tile out of it, so neighbouring tiles agree and one call serves many. Default true. Set false to generate per tile (visible seams, one call per tile). Ignored by image.png, which has no tile address.",
+          "type": "boolean"
+        },
+        "anchor_zoom_delta": {
+          "description": "Anchor cell zoom = request zoom minus this. Default 4, i.e. one generation per 16x16 block of tiles.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "anchor_zoom": {
+          "description": "Absolute anchor zoom, overriding anchor_zoom_delta. Clamped to at most the request zoom.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "anchor_size_px": {
+          "description": "Pixel size of the square anchor generation. Default 1024.",
+          "type": "integer",
+          "minimum": 64
+        },
+        "max_side_px": {
+          "description": "Longest side of the control image as sent. Default 1024; the result is scaled back to the viewport.",
+          "type": "integer",
+          "minimum": 64
+        },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "replace_canvas": {
+          "description": "Paste over everything beneath instead of alpha-compositing. Default false.",
+          "type": "boolean"
+        },
+        "cache": {
+          "description": "Disk-cache both the anchor cell and the generation itself. Default true. Turning it off bills every tile of every render.",
+          "type": "boolean"
+        },
+        "api_key_env": { "type": "string" },
+        "extra_body": {
+          "description": "Extra top-level fields merged into the OpenRouter request body.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
     },
     "randomization": {
       "description": "Per-stamp deterministic randomization applied during asset materialization. Seed is derived from rule + feature index + position, so adjacent renders stay visually stable.",
@@ -125,11 +284,12 @@
       "additionalProperties": false
     },
     "assetEntry": {
-      "description": "A single asset definition. Either a plain file (`{file: ..., kind?: ...}`) or a `variant_set` with weighted variants.",
+      "description": "A single asset definition. Either a plain file (`{file: ..., kind?: ...}`) or a `variant_set` with weighted variants. When `file` is an `openrouter://<model>` URI the entry also takes the generation fields in `#/$defs/generatedAsset`.",
       "oneOf": [
         {
           "type": "object",
           "required": ["file"],
+          "allOf": [{ "$ref": "#/$defs/generatedAsset" }],
           "properties": {
             "file": { "$ref": "#/$defs/assetFileRef" },
             "kind": {
@@ -163,6 +323,7 @@
               "items": {
                 "type": "object",
                 "required": ["file"],
+                "allOf": [{ "$ref": "#/$defs/generatedAsset" }],
                 "properties": {
                   "file": { "$ref": "#/$defs/assetFileRef" },
                   "weight": { "type": "number", "minimum": 0 },

@@ -1,0 +1,65 @@
+{
+  "name": "valle-trebba-vivid",
+  "background": "#00000000",
+  "rules": [
+    {
+      "name": "ai-terrain-vivid",
+      "z_index": 0,
+      "geometry": ["Polygon", "MultiPolygon"],
+      "filter": { "__layer": { "not_in": ["Sfondo"] } },
+      "symbolizer": {
+        "type": "ai_image",
+        "model": "google/gemini-2.5-flash-image",
+        "prompt": "A modern high-resolution colour aerial orthophoto of the Po delta lowlands near Comacchio, shot from a light aircraft on a clear morning in late spring. Photographic, not illustrated: true-to-life colour, natural daylight, soft shadows with visible direction, fine grain and real photographic depth. The neutral ground between the mapped units is intensively cultivated farmland — green and gold field parcels in different crop stages, ploughed brown strips, straight drainage ditches, narrow white farm tracks, lines of poplar windbreaks, the occasional red-roofed farmhouse. Rich saturated colour throughout.",
+        "describe_scene": true,
+        "control": {
+          "group_by": "__layer",
+          "background": "#6f7a48",
+          "_comment": "Every colour is the material's own natural colour, not a legend colour. See the README note on choosing control colours: saturated keys survive into the output as flat overlay; natural ones get repainted, and a region the model declines to repaint still lands on a plausible tone.",
+          "groups": {
+            "Cordoni": {
+              "color": "#ded0a8",
+              "describe": "a beach ridge of pale dry sand, slightly raised, parallel to the old shoreline; bleached sandy soil showing through thin grass"
+            },
+            "Dossi": {
+              "color": "#c9b184",
+              "describe": "a raised sandy dune ridge — pale warm sandy soil, dry grass and sparse scrub, standing a little above the surrounding fields"
+            },
+            "Dossi (Valle Pega)": {
+              "color": "#c3b189",
+              "describe": "a low sandy rise under cultivation, paler than the fields around it"
+            },
+            "Paleoalvei": {
+              "color": "#4e5a3f",
+              "describe": "a silted-up former river channel — dark damp olive clay, sinuous, holding moisture and darker vegetation than the fields"
+            },
+            "Linea di costa": {
+              "color": "#4a7c8c",
+              "describe": "shallow brackish lagoon water — teal-green, calm, with pale sandy shallows near the shore"
+            },
+            "Ustrina (aree)": {
+              "color": "#4a3f36",
+              "describe": "a burnt cremation area — scorched dark red-brown earth, bare of vegetation"
+            },
+            "Palificazioni (legno)": {
+              "color": "#6b5a42",
+              "describe": "waterlogged timber piling at the water's edge — dark wet wood and reed"
+            },
+            "Abitato": {
+              "color": "#a09079",
+              "describe": "a low earthen settlement mound, beaten pale ground with dry grass"
+            },
+            "Passerelle": {
+              "color": "#8a7550",
+              "describe": "a narrow raised timber walkway over wet ground"
+            }
+          }
+        },
+        "anchor_zoom_delta": 4,
+        "anchor_size_px": 1024,
+        "max_side_px": 1024,
+        "cache": true
+      }
+    }
+  ]
+}
